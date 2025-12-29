@@ -4,13 +4,13 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="stintagents-eval-private",
+    name="stintagents-evals-private",
     version="0.1.0",
     author="Oluseyi",
     description="Multi-agent voice interaction system for employee onboarding",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/drOluOla/stintagents-eval-private",  
+    url="https://github.com/drOluOla/stintagents-evals-private",  
     packages=find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",

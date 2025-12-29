@@ -23,7 +23,7 @@ Built on OpenAI's Agents SDK and inspired by AISI's open-source safety framework
 ### Install the package
 
 ```python
-!pip install git+https://github.com/drOluOla/stintagents-eval-private.git
+!pip install git+https://github.com/drOluOla/stintagents-evals-private.git
 ```
 
 > [!NOTE]
