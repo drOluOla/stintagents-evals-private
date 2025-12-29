@@ -1,14 +1,22 @@
 """
 Core utilities for StintAgents Voice AI
 Audio processing, transcription, TTS, and agent coordination
+
+Performance Optimizations:
+- ProcessPoolExecutor for CPU-bound audio preprocessing (bypasses GIL)
+- ThreadPoolExecutor for I/O-bound tasks (TTS API, file I/O)
+- Whisper model warm-up to reduce first-inference latency
+- Pipelining: start processing while still receiving audio
 """
 import asyncio
 import threading
+import multiprocessing as mp
 import numpy as np
 import torch
 import io
 import json
-from concurrent.futures import ThreadPoolExecutor
+import os
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import lru_cache
 from typing import Optional, Tuple
 from scipy import signal
@@ -19,9 +27,30 @@ from pydub import AudioSegment
 import stintagents.config as config
 
 # ==============================================================================
-# SHARED EXECUTOR POOL (reduces overhead vs creating executors per-request)
+# EXECUTOR POOLS
+# - ThreadPool: I/O-bound (TTS API calls, network, file I/O)
+# - ProcessPool: CPU-bound (audio preprocessing, numpy/scipy operations)
 # ==============================================================================
-_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audio_worker")
+_NUM_WORKERS = min(4, (os.cpu_count() or 2))
+_THREAD_EXECUTOR = ThreadPoolExecutor(max_workers=_NUM_WORKERS, thread_name_prefix="io_worker")
+_PROCESS_EXECUTOR: Optional[ProcessPoolExecutor] = None
+_process_lock = threading.Lock()
+
+def get_process_executor() -> ProcessPoolExecutor:
+    """Lazy-init ProcessPoolExecutor (avoids issues with module-level init)."""
+    global _PROCESS_EXECUTOR
+    with _process_lock:
+        if _PROCESS_EXECUTOR is None:
+            # Use 'spawn' to avoid CUDA fork issues on Linux
+            ctx = mp.get_context('spawn')
+            _PROCESS_EXECUTOR = ProcessPoolExecutor(
+                max_workers=_NUM_WORKERS,
+                mp_context=ctx
+            )
+    return _PROCESS_EXECUTOR
+
+# Backward compat alias
+_EXECUTOR = _THREAD_EXECUTOR
 
 # ==============================================================================
 # EVENT LOOP
@@ -52,6 +81,18 @@ print(f"[init] Using {device.upper()}{f': {torch.cuda.get_device_name(0)}' if US
 print(f"[init] Loading Whisper model from HuggingFace (first run may take a moment)...")
 
 WHISPER_MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+# Warm up the model with a dummy audio to compile/cache kernels
+def _warmup_whisper():
+    """Warm up Whisper model to reduce first-inference latency."""
+    try:
+        dummy_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
+        list(WHISPER_MODEL.transcribe(dummy_audio, beam_size=1, language="en"))
+        print("[init] Whisper model warmed up")
+    except Exception as e:
+        print(f"[init] Whisper warmup skipped: {e}")
+
+_warmup_whisper()
 
 def get_or_create_session(conversation_id: str):
     """Get or create a session - SQLiteSession should be imported in notebook"""
@@ -114,10 +155,80 @@ def preprocess_audio(raw_audio, sample_rate):
     
     return raw_audio, 16000
 
-async def preprocess_audio_async(raw_audio, sample_rate) -> Tuple[np.ndarray, int]:
-    """Async wrapper to run preprocessing in thread pool."""
+# Standalone function for ProcessPool (must be picklable - no closures)
+def _preprocess_audio_worker(raw_audio_bytes: bytes, dtype: str, shape: tuple, sample_rate: int) -> Tuple[bytes, str, tuple, int]:
+    """Worker function for multiprocessing - receives/returns serializable data."""
+    import numpy as np
+    from scipy import signal
+    from math import gcd
+    
+    # Reconstruct numpy array from bytes
+    raw_audio = np.frombuffer(raw_audio_bytes, dtype=dtype).reshape(shape).copy()
+    
+    if raw_audio.size == 0:
+        return np.array([], dtype=np.float32).tobytes(), 'float32', (0,), 16000
+    
+    # Convert to float32
+    if raw_audio.dtype == np.int16:
+        raw_audio = raw_audio.astype(np.float32) * (1.0 / 32768.0)
+    elif raw_audio.dtype == np.int32:
+        raw_audio = raw_audio.astype(np.float32) * (1.0 / 2147483648.0)
+    elif raw_audio.dtype != np.float32:
+        raw_audio = raw_audio.astype(np.float32)
+    
+    # Mono conversion
+    if raw_audio.ndim > 1:
+        raw_audio = np.mean(raw_audio, axis=1, dtype=np.float32)
+    
+    # Normalize
+    max_amp = np.abs(raw_audio).max()
+    if max_amp > 1e-6:
+        raw_audio *= (0.95 / max_amp)
+    
+    # Resample to 16kHz
+    if sample_rate != 16000:
+        g = gcd(sample_rate, 16000)
+        up, down = 16000 // g, sample_rate // g
+        raw_audio = signal.resample_poly(raw_audio, up, down).astype(np.float32)
+    
+    return raw_audio.tobytes(), 'float32', raw_audio.shape, 16000
+
+async def preprocess_audio_async(raw_audio, sample_rate, use_multiprocessing: bool = True) -> Tuple[np.ndarray, int]:
+    """Async wrapper - uses ProcessPool for CPU-bound work (bypasses GIL).
+    
+    Args:
+        raw_audio: Input audio array
+        sample_rate: Sample rate of input
+        use_multiprocessing: If True, uses ProcessPool (faster for large audio).
+                            If False, uses ThreadPool (less overhead for small audio).
+    """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_EXECUTOR, preprocess_audio, raw_audio, sample_rate)
+    
+    if not isinstance(raw_audio, np.ndarray):
+        raw_audio = np.array(raw_audio, dtype=np.float32)
+    
+    # For small audio chunks, thread pool has less overhead
+    # For larger chunks (>1s at 16kHz), process pool wins
+    if not use_multiprocessing or raw_audio.size < 16000:
+        return await loop.run_in_executor(_THREAD_EXECUTOR, preprocess_audio, raw_audio, sample_rate)
+    
+    # Use ProcessPool for true parallelism on CPU-bound work
+    try:
+        executor = get_process_executor()
+        result = await loop.run_in_executor(
+            executor,
+            _preprocess_audio_worker,
+            raw_audio.tobytes(),
+            str(raw_audio.dtype),
+            raw_audio.shape,
+            sample_rate
+        )
+        audio_bytes, dtype, shape, out_rate = result
+        return np.frombuffer(audio_bytes, dtype=dtype).reshape(shape), out_rate
+    except Exception as e:
+        # Fallback to thread pool on any multiprocessing issue
+        print(f"[WARN] ProcessPool failed, using ThreadPool: {e}")
+        return await loop.run_in_executor(_THREAD_EXECUTOR, preprocess_audio, raw_audio, sample_rate)
 
 def convert_audio_bytes(audio_bytes: bytes, format: str = "mp3"):
     """Convert TTS audio bytes to (sample_rate, numpy_array) for Gradio.
@@ -142,7 +253,7 @@ def convert_audio_bytes(audio_bytes: bytes, format: str = "mp3"):
 async def convert_audio_bytes_async(audio_bytes: bytes, format: str = "mp3"):
     """Async wrapper for audio conversion - runs in thread pool."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_EXECUTOR, convert_audio_bytes, audio_bytes, format)
+    return await loop.run_in_executor(_THREAD_EXECUTOR, convert_audio_bytes, audio_bytes, format)
 
 # ==============================================================================
 # TTS & TRANSCRIPTION
@@ -264,9 +375,9 @@ def process_voice_input(audio_data, conversation_id: str = "default", runner=Non
     Complete voice processing pipeline - returns (audio, agent_name).
     
     Optimizations:
-    - Async audio preprocessing (runs in thread pool)
-    - Async audio conversion (runs in thread pool)
-    - All I/O-bound operations are non-blocking
+    - ProcessPool for CPU-bound audio preprocessing (bypasses Python GIL)
+    - ThreadPool for I/O-bound operations (TTS API, network)
+    - Concurrent execution where possible
     
     Args:
         audio_data: Audio input from Gradio
@@ -286,8 +397,10 @@ def process_voice_input(audio_data, conversation_id: str = "default", runner=Non
             if hasattr(raw_audio, 'size') and raw_audio.size == 0:
                 return None, None
             
-            # Process pipeline - preprocessing runs in thread pool
-            processed_audio, _ = await preprocess_audio_async(raw_audio, sample_rate)
+            # Use multiprocessing for audio > 1 second (bypasses GIL for CPU work)
+            use_mp = raw_audio.size > sample_rate  # >1 second of audio
+            processed_audio, _ = await preprocess_audio_async(raw_audio, sample_rate, use_multiprocessing=use_mp)
+            
             transcription = await transcribe_audio_async(processed_audio)
             
             if not transcription:
@@ -297,7 +410,7 @@ def process_voice_input(audio_data, conversation_id: str = "default", runner=Non
                 transcription, conversation_id, runner, hr_manager_agent
             )
             
-            # Convert speech to playable format (runs in thread pool)
+            # Convert speech to playable format (I/O bound, use thread pool)
             output_audio = await convert_audio_bytes_async(speech_bytes, "mp3") if speech_bytes else None
             
             return output_audio, active_agent
@@ -315,6 +428,14 @@ def process_voice_input(audio_data, conversation_id: str = "default", runner=Non
     except Exception as e:
         print(f"[ERROR] {e}")
         return None, None
+
+def cleanup_executors():
+    """Cleanup function to properly shutdown executor pools."""
+    global _PROCESS_EXECUTOR
+    if _PROCESS_EXECUTOR is not None:
+        _PROCESS_EXECUTOR.shutdown(wait=False)
+        _PROCESS_EXECUTOR = None
+    _THREAD_EXECUTOR.shutdown(wait=False)
 
 # Initialize
 get_or_create_event_loop()
