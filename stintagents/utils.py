@@ -761,3 +761,118 @@ def cleanup_executors():
 # Initialize
 get_or_create_event_loop()
 print("[init] Ready!")
+
+
+# ==============================================================================
+# BATCH AUDIO PROCESSING (Multi-GPU Optimized)
+# ==============================================================================
+async def process_audio_batch_async(
+    audio_data_list: List[Tuple[int, np.ndarray]],
+    conversation_id: str = "default",
+    runner=None,
+    hr_manager_agent=None
+) -> List[Tuple[Optional[Tuple], Optional[str]]]:
+    """
+    Process multiple audio inputs in parallel using multi-GPU workers.
+    
+    This is the most efficient way to process multiple audio files at once,
+    distributing transcription work across all available GPUs.
+    
+    Args:
+        audio_data_list: List of (sample_rate, audio_array) tuples
+        conversation_id: Session identifier
+        runner: Runner instance
+        hr_manager_agent: The hr_manager agent instance
+        
+    Returns:
+        List of (output_audio, agent_name) tuples
+    """
+    if not audio_data_list:
+        return []
+    
+    # Step 1: Preprocess all audio in parallel (CPU-bound)
+    preprocess_tasks = []
+    for sample_rate, raw_audio in audio_data_list:
+        if hasattr(raw_audio, 'size') and raw_audio.size == 0:
+            preprocess_tasks.append(None)
+        else:
+            use_mp = raw_audio.size > sample_rate
+            preprocess_tasks.append(
+                preprocess_audio_async(raw_audio, sample_rate, use_multiprocessing=use_mp)
+            )
+    
+    # Process non-None tasks
+    valid_indices = [i for i, t in enumerate(preprocess_tasks) if t is not None]
+    valid_tasks = [preprocess_tasks[i] for i in valid_indices]
+    
+    if not valid_tasks:
+        return [(None, None) for _ in audio_data_list]
+    
+    preprocessed_results = await asyncio.gather(*valid_tasks, return_exceptions=True)
+    
+    # Build list of preprocessed audio
+    preprocessed_audio_list = []
+    preprocessed_map = {}  # Maps original index to preprocessed index
+    
+    for idx, (orig_idx, result) in enumerate(zip(valid_indices, preprocessed_results)):
+        if isinstance(result, Exception):
+            print(f"[WARN] Preprocessing failed for item {orig_idx}: {result}")
+            continue
+        audio, _ = result
+        preprocessed_map[orig_idx] = len(preprocessed_audio_list)
+        preprocessed_audio_list.append(audio)
+    
+    if not preprocessed_audio_list:
+        return [(None, None) for _ in audio_data_list]
+    
+    # Step 2: Batch transcribe using multi-GPU pool
+    transcriptions = await transcribe_audio_batch_async(preprocessed_audio_list)
+    
+    # Step 3: Generate responses and TTS for each transcription
+    results = [(None, None) for _ in audio_data_list]
+    
+    for orig_idx, preproc_idx in preprocessed_map.items():
+        transcription = transcriptions[preproc_idx]
+        if not transcription:
+            continue
+            
+        try:
+            response_text, active_agent, speech_bytes = await get_agent_response_with_speech(
+                transcription, conversation_id, runner, hr_manager_agent
+            )
+            output_audio = await convert_audio_bytes_async(speech_bytes, "mp3") if speech_bytes else None
+            results[orig_idx] = (output_audio, active_agent)
+        except Exception as e:
+            print(f"[ERROR] Response generation failed for item {orig_idx}: {e}")
+    
+    return results
+
+
+def process_audio_batch(
+    audio_data_list: List[Tuple[int, np.ndarray]],
+    conversation_id: str = "default",
+    runner=None,
+    hr_manager_agent=None
+) -> List[Tuple[Optional[Tuple], Optional[str]]]:
+    """
+    Synchronous wrapper for batch audio processing.
+    
+    Args:
+        audio_data_list: List of (sample_rate, audio_array) tuples
+        conversation_id: Session identifier
+        runner: Runner instance
+        hr_manager_agent: The hr_manager agent instance
+        
+    Returns:
+        List of (output_audio, agent_name) tuples
+    """
+    loop = get_or_create_event_loop()
+    future = asyncio.run_coroutine_threadsafe(
+        process_audio_batch_async(audio_data_list, conversation_id, runner, hr_manager_agent),
+        loop
+    )
+    try:
+        return future.result(timeout=120)  # 2 minute timeout for batch
+    except Exception as e:
+        print(f"[ERROR] Batch processing: {e}")
+        return [(None, None) for _ in audio_data_list]
