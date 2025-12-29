@@ -5,6 +5,7 @@ Audio processing, transcription, TTS, and agent coordination
 Performance Optimizations:
 - ProcessPoolExecutor for CPU-bound audio preprocessing (bypasses GIL)
 - ThreadPoolExecutor for I/O-bound tasks (TTS API, file I/O)
+- Multi-GPU worker pool for parallel transcription (load balancing)
 - Whisper model warm-up to reduce first-inference latency
 - Pipelining: start processing while still receiving audio
 """
@@ -16,9 +17,11 @@ import torch
 import io
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import queue
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
+from dataclasses import dataclass
 from scipy import signal
 from faster_whisper import WhisperModel
 from openai import AsyncOpenAI
@@ -51,6 +54,276 @@ def get_process_executor() -> ProcessPoolExecutor:
 
 # Backward compat alias
 _EXECUTOR = _THREAD_EXECUTOR
+
+# ==============================================================================
+# MULTI-GPU WORKER POOL
+# - Distributes transcription workload across multiple GPUs
+# - Each GPU has its own Whisper model instance
+# - Round-robin load balancing with queue-based task distribution
+# ==============================================================================
+@dataclass
+class GPUWorkerConfig:
+    """Configuration for GPU workers."""
+    model_size: str = "base"
+    compute_type: str = "float16"
+    max_queue_size: int = 100
+    worker_timeout: float = 30.0
+
+class GPUWorker:
+    """Individual GPU worker with dedicated Whisper model."""
+    
+    def __init__(self, gpu_id: int, config: GPUWorkerConfig):
+        self.gpu_id = gpu_id
+        self.config = config
+        self.model: Optional[WhisperModel] = None
+        self.task_queue: queue.Queue = queue.Queue(maxsize=config.max_queue_size)
+        self.result_dict: Dict[int, Any] = {}
+        self.result_lock = threading.Lock()
+        self.running = False
+        self.worker_thread: Optional[threading.Thread] = None
+        self.task_counter = 0
+        self.counter_lock = threading.Lock()
+        
+    def start(self):
+        """Start the worker thread."""
+        if self.running:
+            return
+        self.running = True
+        self.worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name=f"gpu_worker_{self.gpu_id}",
+            daemon=True
+        )
+        self.worker_thread.start()
+        
+    def stop(self):
+        """Stop the worker thread."""
+        self.running = False
+        # Send sentinel to unblock queue
+        try:
+            self.task_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5.0)
+            
+    def _init_model(self):
+        """Initialize Whisper model on this GPU."""
+        if self.model is not None:
+            return
+        device = f"cuda:{self.gpu_id}"
+        print(f"[GPU Worker {self.gpu_id}] Initializing Whisper model on {device}...")
+        self.model = WhisperModel(
+            self.config.model_size,
+            device=device,
+            compute_type=self.config.compute_type
+        )
+        # Warm up
+        dummy_audio = np.zeros(16000, dtype=np.float32)
+        list(self.model.transcribe(dummy_audio, beam_size=1, language="en"))
+        print(f"[GPU Worker {self.gpu_id}] Ready!")
+        
+    def _worker_loop(self):
+        """Main worker loop - processes tasks from queue."""
+        try:
+            self._init_model()
+        except Exception as e:
+            print(f"[GPU Worker {self.gpu_id}] Failed to initialize: {e}")
+            self.running = False
+            return
+            
+        while self.running:
+            try:
+                task = self.task_queue.get(timeout=1.0)
+                if task is None:  # Sentinel
+                    continue
+                    
+                task_id, audio, kwargs = task
+                try:
+                    segments, _ = self.model.transcribe(audio, **kwargs)
+                    result = " ".join(seg.text for seg in segments).strip()
+                except Exception as e:
+                    result = None
+                    print(f"[GPU Worker {self.gpu_id}] Transcription error: {e}")
+                
+                with self.result_lock:
+                    self.result_dict[task_id] = result
+                    
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[GPU Worker {self.gpu_id}] Worker error: {e}")
+                
+    def submit(self, audio: np.ndarray, **kwargs) -> int:
+        """Submit transcription task. Returns task_id."""
+        with self.counter_lock:
+            task_id = self.task_counter
+            self.task_counter += 1
+        self.task_queue.put((task_id, audio, kwargs))
+        return task_id
+        
+    def get_result(self, task_id: int, timeout: float = 30.0) -> Optional[str]:
+        """Wait for and retrieve result."""
+        import time
+        start = time.time()
+        while time.time() - start < timeout:
+            with self.result_lock:
+                if task_id in self.result_dict:
+                    return self.result_dict.pop(task_id)
+            time.sleep(0.01)
+        return None
+        
+    @property
+    def queue_size(self) -> int:
+        return self.task_queue.qsize()
+
+
+class MultiGPUTranscriptionPool:
+    """Pool of GPU workers for parallel transcription."""
+    
+    def __init__(self, config: Optional[GPUWorkerConfig] = None):
+        self.config = config or GPUWorkerConfig()
+        self.workers: List[GPUWorker] = []
+        self.num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        self.round_robin_idx = 0
+        self.rr_lock = threading.Lock()
+        self._initialized = False
+        
+    def initialize(self, num_workers: Optional[int] = None):
+        """Initialize GPU workers."""
+        if self._initialized:
+            return
+            
+        if self.num_gpus == 0:
+            print("[MultiGPU] No GPUs available, will use single-threaded fallback")
+            self._initialized = True
+            return
+            
+        num_workers = num_workers or self.num_gpus
+        num_workers = min(num_workers, self.num_gpus)
+        
+        print(f"[MultiGPU] Initializing {num_workers} GPU worker(s) across {self.num_gpus} GPU(s)")
+        
+        for i in range(num_workers):
+            gpu_id = i % self.num_gpus  # Distribute across GPUs
+            worker = GPUWorker(gpu_id, self.config)
+            worker.start()
+            self.workers.append(worker)
+            
+        self._initialized = True
+        print(f"[MultiGPU] Pool ready with {len(self.workers)} workers")
+        
+    def _select_worker(self) -> Optional[GPUWorker]:
+        """Select worker using least-loaded strategy."""
+        if not self.workers:
+            return None
+            
+        # Find worker with smallest queue
+        min_worker = min(self.workers, key=lambda w: w.queue_size)
+        return min_worker
+        
+    def transcribe(self, audio: np.ndarray, **kwargs) -> Optional[str]:
+        """Transcribe audio using available GPU worker."""
+        if not self._initialized:
+            self.initialize()
+            
+        worker = self._select_worker()
+        if worker is None:
+            return None
+            
+        task_id = worker.submit(audio, **kwargs)
+        return worker.get_result(task_id, timeout=self.config.worker_timeout)
+        
+    async def transcribe_async(self, audio: np.ndarray, **kwargs) -> Optional[str]:
+        """Async transcription - submits to worker pool."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_THREAD_EXECUTOR, self.transcribe, audio, **kwargs)
+        
+    def transcribe_batch(self, audio_list: List[np.ndarray], **kwargs) -> List[Optional[str]]:
+        """Transcribe multiple audio clips in parallel across GPU workers."""
+        if not self._initialized:
+            self.initialize()
+            
+        if not self.workers:
+            # Fallback: single-threaded
+            return [self._fallback_transcribe(audio, **kwargs) for audio in audio_list]
+            
+        # Submit all tasks, distributing across workers
+        task_assignments: List[Tuple[GPUWorker, int]] = []
+        for audio in audio_list:
+            worker = self._select_worker()
+            task_id = worker.submit(audio, **kwargs)
+            task_assignments.append((worker, task_id))
+            
+        # Collect all results
+        results = []
+        for worker, task_id in task_assignments:
+            result = worker.get_result(task_id, timeout=self.config.worker_timeout)
+            results.append(result)
+            
+        return results
+        
+    async def transcribe_batch_async(self, audio_list: List[np.ndarray], **kwargs) -> List[Optional[str]]:
+        """Async batch transcription."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_THREAD_EXECUTOR, self.transcribe_batch, audio_list, **kwargs)
+        
+    def _fallback_transcribe(self, audio: np.ndarray, **kwargs) -> Optional[str]:
+        """Fallback for when no GPU workers available."""
+        global WHISPER_MODEL
+        try:
+            segments, _ = WHISPER_MODEL.transcribe(audio, **kwargs)
+            return " ".join(seg.text for seg in segments).strip()
+        except Exception as e:
+            print(f"[MultiGPU Fallback] Transcription error: {e}")
+            return None
+            
+    def shutdown(self):
+        """Shutdown all workers."""
+        for worker in self.workers:
+            worker.stop()
+        self.workers.clear()
+        self._initialized = False
+        
+    @property
+    def is_available(self) -> bool:
+        """Check if multi-GPU is available and initialized."""
+        return self._initialized and len(self.workers) > 0
+        
+    def get_stats(self) -> Dict[str, Any]:
+        """Get pool statistics."""
+        return {
+            "num_gpus": self.num_gpus,
+            "num_workers": len(self.workers),
+            "queue_sizes": [w.queue_size for w in self.workers],
+            "initialized": self._initialized
+        }
+
+
+# Global multi-GPU pool instance (lazy initialized)
+_MULTI_GPU_POOL: Optional[MultiGPUTranscriptionPool] = None
+_multi_gpu_lock = threading.Lock()
+
+def get_multi_gpu_pool(num_workers: Optional[int] = None) -> MultiGPUTranscriptionPool:
+    """Get or create the multi-GPU transcription pool."""
+    global _MULTI_GPU_POOL
+    with _multi_gpu_lock:
+        if _MULTI_GPU_POOL is None:
+            _MULTI_GPU_POOL = MultiGPUTranscriptionPool()
+        if not _MULTI_GPU_POOL._initialized:
+            _MULTI_GPU_POOL.initialize(num_workers)
+    return _MULTI_GPU_POOL
+
+def enable_multi_gpu_transcription(num_workers: Optional[int] = None):
+    """Enable multi-GPU transcription with specified number of workers.
+    
+    Args:
+        num_workers: Number of GPU workers to spawn. Defaults to number of GPUs.
+                    Can be > num_gpus to have multiple workers per GPU.
+    """
+    pool = get_multi_gpu_pool(num_workers)
+    print(f"[MultiGPU] Enabled: {pool.get_stats()}")
+    return pool
 
 # ==============================================================================
 # EVENT LOOP
@@ -297,11 +570,26 @@ async def generate_speech_async(text: str, agent_name: str = "HR Manager", strea
         print(f"[ERROR] TTS: {e}")
         return None
 
-async def transcribe_audio_async(audio: np.ndarray, sample_rate: int = 16000) -> Optional[str]:
-    """Transcribe audio using faster-whisper."""
+async def transcribe_audio_async(audio: np.ndarray, sample_rate: int = 16000, use_multi_gpu: bool = True) -> Optional[str]:
+    """Transcribe audio using faster-whisper.
+    
+    Args:
+        audio: Preprocessed audio array (16kHz, float32, mono)
+        sample_rate: Sample rate (should be 16000)
+        use_multi_gpu: If True and multiple GPUs available, uses GPU worker pool
+    """
     try:
         loop = asyncio.get_event_loop()
         
+        # Try multi-GPU pool first if enabled
+        if use_multi_gpu and _MULTI_GPU_POOL is not None and _MULTI_GPU_POOL.is_available:
+            return await _MULTI_GPU_POOL.transcribe_async(
+                audio, beam_size=1, language="en", vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=300, threshold=0.5),
+                temperature=0.0, no_speech_threshold=0.6
+            )
+        
+        # Fallback to single model
         def _transcribe():
             segments, _ = WHISPER_MODEL.transcribe(
                 audio, beam_size=1, language="en", vad_filter=True,
@@ -314,6 +602,36 @@ async def transcribe_audio_async(audio: np.ndarray, sample_rate: int = 16000) ->
     except Exception as e:
         print(f"[ERROR] Transcription: {e}")
         return None
+
+
+async def transcribe_audio_batch_async(audio_list: List[np.ndarray], sample_rate: int = 16000) -> List[Optional[str]]:
+    """Transcribe multiple audio clips in parallel using multi-GPU pool.
+    
+    This is the most efficient way to process multiple audio files.
+    
+    Args:
+        audio_list: List of preprocessed audio arrays
+        sample_rate: Sample rate (should be 16000)
+        
+    Returns:
+        List of transcriptions (None for failed items)
+    """
+    pool = get_multi_gpu_pool()
+    
+    if pool.is_available:
+        return await pool.transcribe_batch_async(
+            audio_list,
+            beam_size=1, language="en", vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=300, threshold=0.5),
+            temperature=0.0, no_speech_threshold=0.6
+        )
+    else:
+        # Fallback: process sequentially
+        results = []
+        for audio in audio_list:
+            result = await transcribe_audio_async(audio, sample_rate, use_multi_gpu=False)
+            results.append(result)
+        return results
 
 # ==============================================================================
 # AGENT RESPONSE
@@ -431,10 +749,13 @@ def process_voice_input(audio_data, conversation_id: str = "default", runner=Non
 
 def cleanup_executors():
     """Cleanup function to properly shutdown executor pools."""
-    global _PROCESS_EXECUTOR
+    global _PROCESS_EXECUTOR, _MULTI_GPU_POOL
     if _PROCESS_EXECUTOR is not None:
         _PROCESS_EXECUTOR.shutdown(wait=False)
         _PROCESS_EXECUTOR = None
+    if _MULTI_GPU_POOL is not None:
+        _MULTI_GPU_POOL.shutdown()
+        _MULTI_GPU_POOL = None
     _THREAD_EXECUTOR.shutdown(wait=False)
 
 # Initialize
