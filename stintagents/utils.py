@@ -8,11 +8,13 @@ import numpy as np
 import torch
 import io
 import json
+import tempfile
+import os
 from typing import Optional, Tuple
 from scipy import signal
-from faster_whisper import WhisperModel
 from openai import AsyncOpenAI
 from pydub import AudioSegment
+import soundfile as sf
 
 import stintagents.config as config
 
@@ -34,17 +36,26 @@ def get_or_create_event_loop():
     return _event_loop
 
 # ==============================================================================
-# WHISPER INITIALIZATION
+# WHISPER INITIALIZATION (LAZY LOADING)
 # ==============================================================================
 USE_GPU = torch.cuda.is_available()
 device = "cuda" if USE_GPU else "cpu"
 model_size = "base" if USE_GPU else "tiny"
 compute_type = "float16" if USE_GPU else "int8"
 
-print(f"[init] Using {device.upper()}{f': {torch.cuda.get_device_name(0)}' if USE_GPU else ''}")
-print(f"[init] Loading Whisper model from HuggingFace (first run may take a moment)...")
+# Lazy-loaded Whisper model (only loaded when STT_MODE is "local")
+_WHISPER_MODEL = None
 
-WHISPER_MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
+def get_whisper_model():
+    """Lazy-load the Whisper model only when needed."""
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        from faster_whisper import WhisperModel
+        print(f"[init] Using {device.upper()}{f': {torch.cuda.get_device_name(0)}' if USE_GPU else ''}")
+        print(f"[init] Loading Whisper model from HuggingFace (first run may take a moment)...")
+        _WHISPER_MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
+        print(f"[init] Whisper model loaded!")
+    return _WHISPER_MODEL
 
 def get_or_create_session(conversation_id: str):
     """Get or create a session - SQLiteSession should be imported in notebook"""
@@ -122,22 +133,62 @@ async def generate_speech_async(text: str, agent_name: str = "HR Manager") -> Op
         return None
 
 async def transcribe_audio_async(audio: np.ndarray, sample_rate: int = 16000) -> Optional[str]:
-    """Transcribe audio using faster-whisper."""
+    """
+    Transcribe audio using either local faster-whisper or OpenAI API.
+    
+    Mode is controlled by config.STT_MODE:
+    - "local": Uses faster-whisper (offline, requires model download)
+    - "api": Uses OpenAI gpt-4o-mini-transcribe (requires API key)
+    """
     try:
-        loop = asyncio.get_event_loop()
-        
-        def _transcribe():
-            segments, _ = WHISPER_MODEL.transcribe(
-                audio, beam_size=1, language="en", vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=300, threshold=0.5),
-                temperature=0.0, no_speech_threshold=0.6
-            )
-            return " ".join(seg.text for seg in segments).strip()
-        
-        return await loop.run_in_executor(None, _transcribe)
+        if config.STT_MODE == "api":
+            return await _transcribe_with_api(audio, sample_rate)
+        else:
+            return await _transcribe_with_local(audio, sample_rate)
     except Exception as e:
         print(f"[ERROR] Transcription: {e}")
         return None
+
+
+async def _transcribe_with_local(audio: np.ndarray, sample_rate: int = 16000) -> Optional[str]:
+    """Transcribe audio using local faster-whisper model."""
+    loop = asyncio.get_event_loop()
+    whisper_model = get_whisper_model()
+    
+    def _transcribe():
+        segments, _ = whisper_model.transcribe(
+            audio, beam_size=1, language="en", vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=300, threshold=0.5),
+            temperature=0.0, no_speech_threshold=0.6
+        )
+        return " ".join(seg.text for seg in segments).strip()
+    
+    return await loop.run_in_executor(None, _transcribe)
+
+
+async def _transcribe_with_api(audio: np.ndarray, sample_rate: int = 16000) -> Optional[str]:
+    """
+    Transcribe audio using OpenAI's gpt-4o-mini-transcribe API.
+    
+    See: https://platform.openai.com/docs/guides/speech-to-text
+    """
+    # Create a temporary WAV file (OpenAI API requires a file)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
+        sf.write(tmp_path, audio, sample_rate)
+    
+    try:
+        with open(tmp_path, "rb") as audio_file:
+            response = await async_openai_client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=audio_file,
+                language="en"
+            )
+        return response.text.strip()
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 # ==============================================================================
 # AGENT RESPONSE
