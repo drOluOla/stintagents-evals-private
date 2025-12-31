@@ -62,21 +62,3 @@ CONVERSATION_SESSIONS = {}
 
 # Tool expected responses (for evaluation)
 CURRENT_TOOL_EXPECTED = {}
-
-# Speech-to-text configuration
-# Options: "local" (faster-whisper) or "api" (OpenAI gpt-4o-mini-transcribe)
-STT_MODE = "local"
-
-def set_stt_mode(mode: str):
-    """
-    Set the speech-to-text mode.
-    
-    Args:
-        mode: "local" for faster-whisper (offline, requires download)
-              "api" for OpenAI gpt-4o-mini-transcribe (requires API key)
-    """
-    global STT_MODE
-    if mode not in ("local", "api"):
-        raise ValueError(f"Invalid STT mode: {mode}. Use 'local' or 'api'.")
-    STT_MODE = mode
-    print(f"[config] STT mode set to: {mode}")
