@@ -241,14 +241,33 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     await session.__aenter__()
                     
                     # Restore conversation history to new session
+                    # Must send items to the server, not just update local _history
                     if conversation_history:
-                        session._history = conversation_history
-                        print(f"[INFO] Restored {len(conversation_history)} history items to new session")
+                        print(f"[INFO] Restoring {len(conversation_history)} history items to new session")
+                        for item in conversation_history:
+                            try:
+                                # Send each history item to the server
+                                item_dict = item.model_dump(exclude_none=True)
+                                await session.model.send_event({
+                                    "type": "conversation.item.create",
+                                    "item": item_dict
+                                })
+                            except Exception as e:
+                                print(f"[WARN] Failed to restore history item {item.item_id}: {e}")
+                        print(f"[INFO] Successfully sent {len(conversation_history)} history items to server")
                     
                     with _SESSION_LOCK:
                         _REALTIME_SESSIONS[session_key] = session
                     
                     print(f"[INFO] Session restarted with voice '{new_voice}' for {to_agent}")
+                    
+                    # Trigger the new agent to respond immediately after handoff
+                    try:
+                        await session.model.send_event({"type": "response.create"})
+                        print(f"[INFO] Triggered response from {to_agent} after handoff")
+                    except Exception as e:
+                        print(f"[WARN] Failed to trigger response: {e}")
+                    
                     # Continue listening on new session
                     start_time = asyncio.get_event_loop().time()  # Reset timeout
                 

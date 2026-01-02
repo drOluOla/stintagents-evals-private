@@ -26,7 +26,7 @@ setup(
         "numpy>=2.1.3",
         "torch>=2.5.1",
         "scipy>=1.14.1",
-        "faster-whisper==1.2.1",
+        # "faster-whisper==1.2.1",
         "pydub-ng>=0.2.0"
     ],
 )
