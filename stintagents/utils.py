@@ -102,6 +102,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
     async def _process():
         try:
             from agents.realtime import RealtimeSession
+            import os
             
             # Extract and process audio
             sample_rate, raw_audio = audio_data if isinstance(audio_data, tuple) else (24000, audio_data)
@@ -115,22 +116,79 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             # Convert to base64
             audio_base64 = audio_to_base64_pcm16(pcm16_audio)
             
-            # Get or create RealtimeSession for this agent
-            session = get_or_create_session(conversation_id)
+            print(f"[INFO] Processing {len(pcm16_audio)} samples with {realtime_agent.name}")
             
-            # Use RealtimeAgent's built-in streaming capabilities
-            # The SDK handles WebSocket connection, VAD, and tool execution
-            # For now, we'll use a simplified approach
-            # In production, you'd integrate with RealtimeSession properly
+            # Create a RealtimeSession for streaming
+            api_key = os.environ.get("OPENAI_API_KEY")
             
-            # Placeholder for SDK integration
-            # The actual implementation would use RealtimeSession.connect() and stream audio
-            print(f"[DEBUG] Processing audio with agent: {realtime_agent.name}")
-            print(f"[DEBUG] Audio length: {len(pcm16_audio)} samples")
+            session = RealtimeSession(
+                agent=realtime_agent,
+                api_key=api_key,
+                model="gpt-4o-realtime-preview-2024-12-17"
+            )
             
-            # For now, return None to indicate SDK integration needed
-            # This will be replaced with proper SDK streaming
-            return None, realtime_agent.name
+            # Connect to Realtime API
+            await session.connect()
+            
+            # Send audio input
+            await session.input_audio_buffer_append(audio_base64)
+            await session.input_audio_buffer_commit()
+            
+            # Collect response audio
+            response_audio_chunks = []
+            response_text = ""
+            active_agent = realtime_agent.name
+            
+            # Listen for response events
+            async for event in session.listen():
+                event_type = event.get("type")
+                
+                if event_type == "response.audio.delta":
+                    # Collect audio chunks
+                    delta = event.get("delta", "")
+                    if delta:
+                        response_audio_chunks.append(delta)
+                
+                elif event_type == "response.audio_transcript.delta":
+                    # Collect transcript
+                    delta = event.get("delta", "")
+                    response_text += delta
+                
+                elif event_type == "response.done":
+                    # Response complete
+                    print(f"[INFO] Response complete: {response_text[:100]}...")
+                    break
+                
+                elif event_type == "error":
+                    print(f"[ERROR] Realtime API error: {event.get('error', {})}")
+                    break
+            
+            # Close session
+            await session.disconnect()
+            
+            # Combine audio chunks and convert to Gradio format
+            if response_audio_chunks:
+                combined_audio_base64 = "".join(response_audio_chunks)
+                output_audio = base64_pcm16_to_audio(combined_audio_base64)
+                
+                # Save transcript to session for evaluation
+                session_obj = get_or_create_session(conversation_id)
+                await session_obj.add_items([
+                    {"role": "assistant", "content": response_text},
+                    {
+                        "role": "system",
+                        "content": json.dumps({
+                            "evaluation_metadata": True,
+                            "responding_agent": active_agent,
+                            "expected_response": config.CURRENT_TOOL_EXPECTED.get("expected", response_text),
+                        })
+                    }
+                ])
+                config.CURRENT_TOOL_EXPECTED.clear()
+                
+                return output_audio, active_agent
+            
+            return None, None
         
         except Exception as e:
             print(f"[ERROR] Realtime pipeline: {e}")
@@ -145,7 +203,9 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
     try:
         return future.result(timeout=30)
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] Future execution: {e}")
+        import traceback
+        traceback.print_exc()
         return None, None
 
 # Initialize
