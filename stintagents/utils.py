@@ -257,7 +257,16 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         _REALTIME_SESSIONS[session_key] = session
                     
                     print(f"[INFO] Session restarted with voice '{new_voice}' for {to_agent}")
-                    print(f"[INFO] {to_agent} is ready - waiting for user to continue speaking...")
+                    
+                    # Trigger new agent to respond by committing the audio buffer
+                    # This simulates the natural flow: user asked question → agent responds
+                    try:
+                        # Send a tiny silence buffer to trigger VAD response
+                        silence = np.zeros(480, dtype=np.int16)  # 20ms of silence at 24kHz
+                        await session.send_audio(silence.tobytes(), commit=True)
+                        print(f"[INFO] Triggered {to_agent} to respond to handoff request")
+                    except Exception as e:
+                        print(f"[WARN] Failed to trigger response: {e}")
                     
                     # Continue listening on new session
                     start_time = asyncio.get_event_loop().time()  # Reset timeout
