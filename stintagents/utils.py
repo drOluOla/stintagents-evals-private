@@ -101,7 +101,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
     
     async def _process():
         try:
-            from agents.realtime import RealtimeSession
+            from agents.realtime import RealtimeRunner
             import os
             
             # Extract and process audio
@@ -113,78 +113,83 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             # Convert to PCM16 @ 24kHz for Realtime API
             pcm16_audio, _ = preprocess_audio_for_realtime(raw_audio, sample_rate)
             
-            # Convert to base64
-            audio_base64 = audio_to_base64_pcm16(pcm16_audio)
+            # Convert to raw bytes for send_audio
+            audio_bytes = pcm16_audio.tobytes()
             
             print(f"[INFO] Processing {len(pcm16_audio)} samples with {realtime_agent.name}")
             
-            # Create a RealtimeSession for streaming
-            api_key = os.environ.get("OPENAI_API_KEY")
-            
-            session = RealtimeSession(
-                agent=realtime_agent,
-                context=None,
-                model="gpt-4o-realtime-preview-2024-12-17"
+            # Create RealtimeRunner and start session
+            runner = RealtimeRunner(
+                starting_agent=realtime_agent,
+                config={
+                    "model_settings": {
+                        "model_name": "gpt-4o-realtime-preview-2024-12-17",
+                        "modalities": ["audio"],
+                        "input_audio_format": "pcm16",
+                        "output_audio_format": "pcm16",
+                    }
+                }
             )
             
-            # Connect to Realtime API
-            await session.connect()
-            
-            # Send audio input
-            await session.input_audio_buffer_append(audio_base64)
-            await session.input_audio_buffer_commit()
+            # Start session and send audio
+            session = await runner.run(context={"conversation_id": conversation_id})
             
             # Collect response audio
             response_audio_chunks = []
             response_text = ""
             active_agent = realtime_agent.name
             
-            # Listen for response events
-            async for event in session.listen():
-                event_type = event.get("type")
+            async with session:
+                # Send audio input
+                await session.send_audio(audio_bytes, commit=True)
                 
-                if event_type == "response.audio.delta":
-                    # Collect audio chunks
-                    delta = event.get("delta", "")
-                    if delta:
-                        response_audio_chunks.append(delta)
-                
-                elif event_type == "response.audio_transcript.delta":
-                    # Collect transcript
-                    delta = event.get("delta", "")
-                    response_text += delta
-                
-                elif event_type == "response.done":
-                    # Response complete
-                    print(f"[INFO] Response complete: {response_text[:100]}...")
-                    break
-                
-                elif event_type == "error":
-                    print(f"[ERROR] Realtime API error: {event.get('error', {})}")
-                    break
-            
-            # Close session
-            await session.disconnect()
+                # Listen for response events
+                async for event in session:
+                    event_type = event.type
+                    
+                    if event_type == "audio":
+                        # Collect audio chunks
+                        response_audio_chunks.append(event.audio.data)
+                    
+                    elif event_type == "history_updated":
+                        # Extract transcript from history
+                        for item in event.history:
+                            if hasattr(item, 'role') and item.role == 'assistant':
+                                if hasattr(item, 'content'):
+                                    for content in item.content if isinstance(item.content, list) else [item.content]:
+                                        if hasattr(content, 'text'):
+                                            response_text += content.text
+                    
+                    elif event_type == "audio_end":
+                        # Response complete
+                        print(f"[INFO] Response complete: {response_text[:100] if response_text else 'no transcript'}...")
+                        break
+                    
+                    elif event_type == "error":
+                        print(f"[ERROR] Realtime API error: {event.error if hasattr(event, 'error') else 'unknown'}")
+                        break
             
             # Combine audio chunks and convert to Gradio format
             if response_audio_chunks:
-                combined_audio_base64 = "".join(response_audio_chunks)
-                output_audio = base64_pcm16_to_audio(combined_audio_base64)
+                combined_audio = b"".join(response_audio_chunks)
+                audio_array = np.frombuffer(combined_audio, dtype=np.int16)
+                output_audio = (24000, audio_array)
                 
                 # Save transcript to session for evaluation
-                session_obj = get_or_create_session(conversation_id)
-                await session_obj.add_items([
-                    {"role": "assistant", "content": response_text},
-                    {
-                        "role": "system",
-                        "content": json.dumps({
-                            "evaluation_metadata": True,
-                            "responding_agent": active_agent,
-                            "expected_response": config.CURRENT_TOOL_EXPECTED.get("expected", response_text),
-                        })
-                    }
-                ])
-                config.CURRENT_TOOL_EXPECTED.clear()
+                if response_text:
+                    session_obj = get_or_create_session(conversation_id)
+                    await session_obj.add_items([
+                        {"role": "assistant", "content": response_text},
+                        {
+                            "role": "system",
+                            "content": json.dumps({
+                                "evaluation_metadata": True,
+                                "responding_agent": active_agent,
+                                "expected_response": config.CURRENT_TOOL_EXPECTED.get("expected", response_text),
+                            })
+                        }
+                    ])
+                    config.CURRENT_TOOL_EXPECTED.clear()
                 
                 return output_audio, active_agent
             
