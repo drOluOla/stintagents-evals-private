@@ -257,19 +257,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         _REALTIME_SESSIONS[session_key] = session
                     
                     print(f"[INFO] Session restarted with voice '{new_voice}' for {to_agent}")
-                    
-                    # Trigger the new agent to introduce themselves after handoff
-                    # Send a system-level prompt to make the agent respond
-                    try:
-                        from agents.realtime import RealtimeUserInputText
-                        await session.send_message(
-                            RealtimeUserInputText(
-                                text=f"[System: You have been handed off from {from_agent}. Please introduce yourself and continue assisting the user based on the conversation history.]"
-                            )
-                        )
-                        print(f"[INFO] Triggered response from {to_agent} after handoff")
-                    except Exception as e:
-                        print(f"[WARN] Failed to trigger response: {e}")
+                    print(f"[INFO] {to_agent} is ready - waiting for user to continue speaking...")
                     
                     # Continue listening on new session
                     start_time = asyncio.get_event_loop().time()  # Reset timeout
