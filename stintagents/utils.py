@@ -258,13 +258,16 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     print(f"[INFO] Session restarted with voice '{new_voice}' for {to_agent}")
                     
-                    # Trigger new agent to respond by committing the audio buffer
-                    # This simulates the natural flow: user asked question → agent responds
+                    # Trigger the new agent to introduce themselves after handoff
+                    # Send a system-level prompt to make the agent respond
                     try:
-                        # Send a tiny silence buffer to trigger VAD response
-                        silence = np.zeros(480, dtype=np.int16)  # 20ms of silence at 24kHz
-                        await session.send_audio(silence.tobytes(), commit=True)
-                        print(f"[INFO] Triggered {to_agent} to respond to handoff request")
+                        from agents.realtime import RealtimeUserInputText
+                        await session.send_message(
+                            RealtimeUserInputText(
+                                text=f"[System: You have been handed off from {from_agent}. Please introduce yourself and continue assisting the user based on the conversation history.]"
+                            )
+                        )
+                        print(f"[INFO] Triggered response from {to_agent} after handoff")
                     except Exception as e:
                         print(f"[WARN] Failed to trigger response: {e}")
                     
