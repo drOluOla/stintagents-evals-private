@@ -165,7 +165,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                             if hasattr(item, 'role') and item.role == 'assistant':
                                 if hasattr(item, 'content'):
                                     for content in item.content if isinstance(item.content, list) else [item.content]:
-                                        if hasattr(content, 'text'):
+                                        if hasattr(content, 'text') and content.text:
                                             response_text += content.text
                     
                     elif event_type == "audio_end":
