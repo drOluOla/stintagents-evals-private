@@ -127,6 +127,13 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         "modalities": ["audio"],
                         "input_audio_format": "pcm16",
                         "output_audio_format": "pcm16",
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 500,
+                            "create_response": True,
+                        }
                     }
                 }
             )
@@ -140,8 +147,9 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             active_agent = realtime_agent.name
             
             async with session:
-                # Send audio input
-                await session.send_audio(audio_bytes, commit=True)
+                # Send audio input - don't commit, let turn detection handle it
+                if len(audio_bytes) > 0:
+                    await session.send_audio(audio_bytes, commit=False)
                 
                 # Listen for response events
                 async for event in session:
