@@ -191,28 +191,66 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     response_audio_chunks.append(event.audio.data)
                 
                 elif event_type == "handoff":
-                    # Track agent handoff and update voice
+                    # Track agent handoff - need to restart session for voice change
                     from_agent = event.from_agent.name
-                    to_agent = event.to_agent.name
+                    to_agent_obj = event.to_agent
+                    to_agent = to_agent_obj.name
                     active_agent = to_agent
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
-                    # Get new agent's voice settings and update session
+                    # Get conversation history before closing session
+                    conversation_history = list(session._history) if hasattr(session, '_history') else []
+                    print(f"[INFO] Preserving {len(conversation_history)} history items")
+                    
+                    # Close current session and create new one with new agent
+                    print(f"[INFO] Restarting session for voice change...")
+                    await session.close()
+                    
+                    with _SESSION_LOCK:
+                        if session_key in _REALTIME_SESSIONS:
+                            del _REALTIME_SESSIONS[session_key]
+                    
+                    # Get new agent's voice settings
                     new_persona = config.AGENT_PERSONAS.get(to_agent, {})
                     new_voice = new_persona.get("voice", "alloy")
                     new_speed = new_persona.get("speed", 1.0)
                     
-                    # Send session update to change voice
-                    from agents.realtime import RealtimeModelSendSessionUpdate
-                    await session.model.send_event(
-                        RealtimeModelSendSessionUpdate(
-                            session_settings={
+                    # Create new session with new agent
+                    runner = RealtimeRunner(
+                        starting_agent=to_agent_obj,
+                        config={
+                            "model_settings": {
+                                "model_name": "gpt-4o-realtime-preview-2024-12-17",
+                                "modalities": ["audio"],
                                 "voice": new_voice,
                                 "speed": new_speed,
+                                "input_audio_format": "pcm16",
+                                "output_audio_format": "pcm16",
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "threshold": 0.5,
+                                    "prefix_padding_ms": 300,
+                                    "silence_duration_ms": 500,
+                                    "create_response": True,
+                                },
                             }
-                        )
+                        }
                     )
-                    print(f"[INFO] Updated voice to '{new_voice}' (speed: {new_speed}) for {to_agent}")
+                    
+                    session = await runner.run(context={"conversation_id": conversation_id})
+                    await session.__aenter__()
+                    
+                    # Restore conversation history to new session
+                    if conversation_history:
+                        session._history = conversation_history
+                        print(f"[INFO] Restored {len(conversation_history)} history items to new session")
+                    
+                    with _SESSION_LOCK:
+                        _REALTIME_SESSIONS[session_key] = session
+                    
+                    print(f"[INFO] Session restarted with voice '{new_voice}' for {to_agent}")
+                    # Continue listening on new session
+                    start_time = asyncio.get_event_loop().time()  # Reset timeout
                 
                 elif event_type == "agent_start":
                     # Track which agent is responding
