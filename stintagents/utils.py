@@ -140,11 +140,14 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         config={
                             "model_settings": {
                                 "model_name": "gpt-4o-realtime-preview-2024-12-17",
-                                "modalities": ["audio"],
+                                "modalities": ["audio", "text"],
                                 "voice": voice,
                                 "speed": speed,
                                 "input_audio_format": "pcm16",
                                 "output_audio_format": "pcm16",
+                                "input_audio_transcription": {
+                                    "model": "whisper-1"
+                                },
                                 "turn_detection": {
                                     "type": "server_vad",
                                     "threshold": 0.5,
@@ -165,9 +168,10 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             
             print(f"[INFO] Processing {len(pcm16_audio)} samples with session {session_key}")
             
-            # Collect response audio
+            # Collect response audio and transcripts
             response_audio_chunks = []
             response_text = ""
+            user_transcript = ""
             active_agent = realtime_agent.name
             
             # Send audio input - don't commit, let turn detection handle it
@@ -221,11 +225,14 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         config={
                             "model_settings": {
                                 "model_name": "gpt-4o-realtime-preview-2024-12-17",
-                                "modalities": ["audio"],
+                                "modalities": ["audio", "text"],
                                 "voice": new_voice,
                                 "speed": new_speed,
                                 "input_audio_format": "pcm16",
                                 "output_audio_format": "pcm16",
+                                "input_audio_transcription": {
+                                    "model": "whisper-1"
+                                },
                                 "turn_detection": {
                                     "type": "server_vad",
                                     "threshold": 0.5,
@@ -273,17 +280,36 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     print(f"[INFO] Agent started: {active_agent}")
                 
                 elif event_type == "history_updated":
-                    # Extract transcript from history
+                    # Extract transcripts from history (both user and assistant)
                     for item in event.history:
-                        if hasattr(item, 'role') and item.role == 'assistant':
+                        if hasattr(item, 'role'):
                             if hasattr(item, 'content'):
                                 for content in item.content if isinstance(item.content, list) else [item.content]:
-                                    if hasattr(content, 'text') and content.text:
-                                        response_text += content.text
+                                    # User input transcript
+                                    if item.role == 'user':
+                                        if hasattr(content, 'transcript') and content.transcript:
+                                            user_transcript = content.transcript
+                                            print(f"[TRANSCRIPT] User said: {user_transcript}")
+                                        elif hasattr(content, 'text') and content.text:
+                                            user_transcript = content.text
+                                            print(f"[TRANSCRIPT] User said: {user_transcript}")
+                                    # Assistant response transcript
+                                    elif item.role == 'assistant':
+                                        if hasattr(content, 'text') and content.text:
+                                            response_text = content.text
+                                            print(f"[TRANSCRIPT] {active_agent} said: {response_text}")
+                                        elif hasattr(content, 'transcript') and content.transcript:
+                                            response_text = content.transcript
+                                            print(f"[TRANSCRIPT] {active_agent} said: {response_text}")
                 
                 elif event_type == "audio_end":
-                    # Response complete
-                    print(f"[INFO] Response complete: {response_text[:100] if response_text else 'no transcript'}...")
+                    # Response complete - show full transcript for debugging
+                    if user_transcript:
+                        print(f"[SUMMARY] User input: '{user_transcript}'")
+                    if response_text:
+                        print(f"[SUMMARY] {active_agent} response: '{response_text}'")
+                    else:
+                        print(f"[WARN] No transcript captured for {active_agent}'s response")
                     break
                 
                 elif event_type == "error":
