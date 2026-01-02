@@ -122,12 +122,12 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             audio_bytes = pcm16_audio.tobytes()
             
             # Get or create persistent session for this conversation
-            session_key = f"{conversation_id}_{realtime_agent.name}"
+            session_key = conversation_id  # One session per conversation, not per agent
             session = None
             
             with _SESSION_LOCK:
                 if session_key not in _REALTIME_SESSIONS:
-                    print(f"[INFO] Creating new persistent session for {realtime_agent.name}")
+                    print(f"[INFO] Creating new persistent session for conversation {conversation_id}")
                     
                     # Get voice settings from agent persona
                     agent_persona = config.AGENT_PERSONAS.get(realtime_agent.name, {})
@@ -191,9 +191,28 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     response_audio_chunks.append(event.audio.data)
                 
                 elif event_type == "handoff":
-                    # Track agent handoff
-                    active_agent = event.to_agent.name
-                    print(f"[INFO] Handoff: {event.from_agent.name} → {active_agent}")
+                    # Track agent handoff and update voice
+                    from_agent = event.from_agent.name
+                    to_agent = event.to_agent.name
+                    active_agent = to_agent
+                    print(f"[INFO] Handoff: {from_agent} → {to_agent}")
+                    
+                    # Get new agent's voice settings and update session
+                    new_persona = config.AGENT_PERSONAS.get(to_agent, {})
+                    new_voice = new_persona.get("voice", "alloy")
+                    new_speed = new_persona.get("speed", 1.0)
+                    
+                    # Send session update to change voice
+                    from agents.realtime import RealtimeModelSendSessionUpdate
+                    await session.model.send_event(
+                        RealtimeModelSendSessionUpdate(
+                            session_settings={
+                                "voice": new_voice,
+                                "speed": new_speed,
+                            }
+                        )
+                    )
+                    print(f"[INFO] Updated voice to '{new_voice}' (speed: {new_speed}) for {to_agent}")
                 
                 elif event_type == "agent_start":
                     # Track which agent is responding
