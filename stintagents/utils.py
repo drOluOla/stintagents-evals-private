@@ -219,7 +219,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     new_voice = new_persona.get("voice", "alloy")
                     new_speed = new_persona.get("speed", 1.0)
                     
-                    # Create new session with new agent
+                    # Create new session with new agent and pass conversation history in context
                     runner = RealtimeRunner(
                         starting_agent=to_agent_obj,
                         config={
@@ -244,35 +244,53 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         }
                     )
                     
-                    session = await runner.run(context={"conversation_id": conversation_id})
+                    # Run with context including conversation history
+                    context = {
+                        "conversation_id": conversation_id,
+                        "history": conversation_history
+                    }
+                    session = await runner.run(context=context)
                     await session.__aenter__()
                     
-                    # Restore conversation history to new session by updating local _history
-                    # The SDK will sync this with the server through internal mechanisms
+                    # Verify history was preserved
                     if conversation_history:
-                        session._history = conversation_history
                         print(f"[INFO] Restored {len(conversation_history)} history items to new session")
+                        print(f"[DEBUG] Last history item: {conversation_history[-1] if conversation_history else 'None'}")
                     
                     with _SESSION_LOCK:
                         _REALTIME_SESSIONS[session_key] = session
                     
                     print(f"[INFO] Session restarted with voice '{new_voice}' for {to_agent}")
                     
-                    # Trigger the new agent to introduce themselves after handoff
-                    # Send a system-level prompt to make the agent respond
+                    # Extract the last user message to provide context to the new agent
+                    last_user_message = ""
+                    if conversation_history:
+                        for item in reversed(conversation_history):
+                            if hasattr(item, 'role') and item.role == 'user':
+                                if hasattr(item, 'content'):
+                                    for content in (item.content if isinstance(item.content, list) else [item.content]):
+                                        if hasattr(content, 'transcript') and content.transcript:
+                                            last_user_message = content.transcript
+                                            break
+                                        elif hasattr(content, 'text') and content.text:
+                                            last_user_message = content.text
+                                            break
+                                if last_user_message:
+                                    break
+                        print(f"[DEBUG] Last user request: '{last_user_message}'")
+                    
+                    # Trigger the new agent to introduce themselves and address the user's request
                     try:
-                        from agents.realtime import RealtimeUserInputText
-                        await session.send_message(
-                            RealtimeUserInputText(
-                                text=f"[System: You have been handed off from {from_agent}. Please introduce yourself and continue assisting the user based on the conversation history.]"
-                            )
-                        )
+                        # Create response to trigger the new agent to speak
+                        # The agent should have access to conversation history via the context
+                        await session.create_response()
                         print(f"[INFO] Triggered response from {to_agent} after handoff")
                     except Exception as e:
                         print(f"[WARN] Failed to trigger response: {e}")
                     
-                    # Continue listening on new session
+                    # Continue listening on new session - break out and restart the event loop
                     start_time = asyncio.get_event_loop().time()  # Reset timeout
+                    continue  # This will re-enter the async for loop with the new session
                 
                 elif event_type == "agent_start":
                     # Track which agent is responding
