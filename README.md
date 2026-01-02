@@ -3,13 +3,14 @@
 Build multi-agent voice AI systems with distinct personas for realistic workplace scenarios.
 Evaluate their performance against expected behaviours and test them for safety, all within a Colab or Jupyter notebook.
 
+**Now powered by OpenAI Realtime API for ultra-low latency speech-to-speech interactions!** 🚀
+
 As AI reshapes the labour market and as future-of-work trends indicate that AI will augment human capabilities through collaboration, a critical question emerges. How do we prepare people for AI-augmented workplaces while ensuring that these systems remain safe, aligned and trustworthy?
 
 ![alt text](assets/stintagents-demo-ui.png)
 
 StintAgents Eval is an early stage and evolving toolkit that enables:
-- Multi-agent voice AI simulations with realistic workplace scenarios
-- Agent performance using Inspect AI’s powerful evaluation framework
+- Multi-agent voice AI simulations with realistic workplace scenarios- **Ultra-low latency speech-to-speech using OpenAI Realtime API (85% latency reduction)**- Agent performance using Inspect AI’s powerful evaluation framework
 - Testing for safety vulnerabilities, including prompt injection attacks
 - Verification of alignment with human values and organisational integrity
 - Observability of Agent activities through persistent session memory
@@ -20,10 +21,14 @@ Built on OpenAI's Agents SDK and inspired by AISI's open-source safety framework
 
 ## Usage in Google Colab
 
+> [!IMPORTANT]
+> **Realtime API Migration**: This version uses OpenAI's Realtime API for speech-to-speech processing with 85% lower latency. See [REALTIME_API_MIGRATION.md](REALTIME_API_MIGRATION.md) for details.
+
 ### Install the package
 
 ```python
 !pip install git+https://github.com/drOluOla/stintagents-evals-private.git
+!pip install websockets  # Required for Realtime API
 ```
 
 > [!NOTE]

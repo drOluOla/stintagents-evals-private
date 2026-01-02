@@ -1,10 +1,10 @@
 """
-Gradio UI components for StintAgents Voice AI
+Gradio UI components for StintAgents Voice AI - Realtime API
 """
 import gradio as gr
 import numpy as np
 import random
-from .utils import process_voice_input
+from .utils import process_voice_input_realtime
 
 import stintagents.config as config
 
@@ -31,8 +31,8 @@ def create_agent_avatar(agent_name: str, is_speaking: bool = False) -> str:
     </div>"""
 
 
-def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id):
-    """Create Gradio interface with centralized layout - AUDIO ONLY"""
+def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_agent=None):
+    """Create Gradio interface with centralized layout - AUDIO ONLY with RealtimeAgent"""
     with gr.Blocks(title="Simulated Multi-Agent Voice Call") as iface:
         # Add CSS using HTML component
         gr.HTML("""
@@ -127,8 +127,9 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id):
               </h1>
           </div>
         """)
-        # Conversation state
+        # Conversation state and Realtime agent
         conversation_state = gr.State(value=conversation_id)
+        realtime_agent_state = gr.State(value=realtime_agent)
         
         # Audio buffer for accumulating chunks
         audio_buffer_state = gr.State(value=[])
@@ -175,8 +176,8 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id):
                     size="lg"
                 )
 
-        def detect_silence_and_process(audio_chunk, audio_buffer, silence_counter, has_speech, conversation_id):
-                """Detect silence and process complete audio"""
+        def detect_silence_and_process(audio_chunk, audio_buffer, silence_counter, has_speech, conversation_id, realtime_agent):
+                """Detect silence and process complete audio using RealtimeAgent"""
                 agent_names = list(config.AGENT_PERSONAS.keys())
                 n_avatars = len(agent_names)
                 def avatar_updates():
@@ -244,12 +245,11 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id):
                             all_audio_data = np.concatenate([chunk[1] for chunk in audio_buffer])
                             complete_audio = (sample_rate, all_audio_data)
 
-                            # Process the audio - returns (audio, agent_name)
-                            output_audio, active_agent = process_voice_input(
+                            # Process the audio using RealtimeAgent - returns (audio, agent_name)
+                            output_audio, active_agent = process_voice_input_realtime(
                                 complete_audio,
                                 conversation_id,
-                                runner=config.Runner,
-                                hr_manager_agent=config.hr_manager
+                                realtime_agent=realtime_agent
                             )
 
                             # Generate avatars based on active agent (dynamic)
@@ -292,7 +292,7 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id):
         avatar_output_components = [avatar_components[name] for name in agent_names]
         audio_input.stream(
             fn=detect_silence_and_process,
-            inputs=[audio_input, audio_buffer_state, silence_counter_state, has_speech_state, conversation_state],
+            inputs=[audio_input, audio_buffer_state, silence_counter_state, has_speech_state, conversation_state, realtime_agent_state],
             outputs=[
                 audio_buffer_state,
                 silence_counter_state,
