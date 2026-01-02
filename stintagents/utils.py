@@ -86,6 +86,11 @@ def base64_pcm16_to_audio(base64_str: str, sample_rate: int = 24000) -> Tuple[in
 # ==============================================================================
 # REALTIME VOICE PIPELINE (SDK-based)
 # ==============================================================================
+
+# Global session storage for persistent Realtime sessions
+_REALTIME_SESSIONS = {}
+_SESSION_LOCK = threading.Lock()
+
 def process_voice_input_realtime(audio_data, conversation_id: str = "default", realtime_agent=None):
     """
     Process voice input using RealtimeAgent from official SDK - returns (audio, agent_name).
@@ -116,73 +121,102 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             # Convert to raw bytes for send_audio
             audio_bytes = pcm16_audio.tobytes()
             
-            print(f"[INFO] Processing {len(pcm16_audio)} samples with {realtime_agent.name}")
+            # Get or create persistent session for this conversation
+            session_key = f"{conversation_id}_{realtime_agent.name}"
+            session = None
             
-            # Get voice settings from agent persona
-            agent_persona = config.AGENT_PERSONAS.get(realtime_agent.name, {})
-            voice = agent_persona.get("voice", "alloy")
-            speed = agent_persona.get("speed", 1.0)
-            
-            # Create RealtimeRunner and start session
-            runner = RealtimeRunner(
-                starting_agent=realtime_agent,
-                config={
-                    "model_settings": {
-                        "model_name": "gpt-4o-realtime-preview-2024-12-17",
-                        "modalities": ["audio"],
-                        "voice": voice,
-                        "speed": speed,
-                        "input_audio_format": "pcm16",
-                        "output_audio_format": "pcm16",
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 500,
-                            "create_response": True,
+            with _SESSION_LOCK:
+                if session_key not in _REALTIME_SESSIONS:
+                    print(f"[INFO] Creating new persistent session for {realtime_agent.name}")
+                    
+                    # Get voice settings from agent persona
+                    agent_persona = config.AGENT_PERSONAS.get(realtime_agent.name, {})
+                    voice = agent_persona.get("voice", "alloy")
+                    speed = agent_persona.get("speed", 1.0)
+                    
+                    # Create RealtimeRunner
+                    runner = RealtimeRunner(
+                        starting_agent=realtime_agent,
+                        config={
+                            "model_settings": {
+                                "model_name": "gpt-4o-realtime-preview-2024-12-17",
+                                "modalities": ["audio"],
+                                "voice": voice,
+                                "speed": speed,
+                                "input_audio_format": "pcm16",
+                                "output_audio_format": "pcm16",
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "threshold": 0.5,
+                                    "prefix_padding_ms": 300,
+                                    "silence_duration_ms": 500,
+                                    "create_response": True,
+                                },
+                            }
                         }
-                    }
-                }
-            )
+                    )
+                    
+                    # Start persistent session
+                    session = await runner.run(context={"conversation_id": conversation_id})
+                    await session.__aenter__()  # Enter the context manager
+                    _REALTIME_SESSIONS[session_key] = session
+                else:
+                    session = _REALTIME_SESSIONS[session_key]
             
-            # Start session and send audio
-            session = await runner.run(context={"conversation_id": conversation_id})
+            print(f"[INFO] Processing {len(pcm16_audio)} samples with session {session_key}")
             
             # Collect response audio
             response_audio_chunks = []
             response_text = ""
             active_agent = realtime_agent.name
             
-            async with session:
-                # Send audio input - don't commit, let turn detection handle it
-                if len(audio_bytes) > 0:
-                    await session.send_audio(audio_bytes, commit=False)
+            # Send audio input - don't commit, let turn detection handle it
+            if len(audio_bytes) > 0:
+                await session.send_audio(audio_bytes, commit=False)
+            
+            # Listen for response events (with timeout to avoid hanging)
+            timeout_seconds = 15
+            start_time = asyncio.get_event_loop().time()
+            
+            async for event in session:
+                # Check timeout
+                if asyncio.get_event_loop().time() - start_time > timeout_seconds:
+                    print("[WARN] Response timeout, returning partial results")
+                    break
                 
-                # Listen for response events
-                async for event in session:
-                    event_type = event.type
-                    
-                    if event_type == "audio":
-                        # Collect audio chunks
-                        response_audio_chunks.append(event.audio.data)
-                    
-                    elif event_type == "history_updated":
-                        # Extract transcript from history
-                        for item in event.history:
-                            if hasattr(item, 'role') and item.role == 'assistant':
-                                if hasattr(item, 'content'):
-                                    for content in item.content if isinstance(item.content, list) else [item.content]:
-                                        if hasattr(content, 'text') and content.text:
-                                            response_text += content.text
-                    
-                    elif event_type == "audio_end":
-                        # Response complete
-                        print(f"[INFO] Response complete: {response_text[:100] if response_text else 'no transcript'}...")
-                        break
-                    
-                    elif event_type == "error":
-                        print(f"[ERROR] Realtime API error: {event.error if hasattr(event, 'error') else 'unknown'}")
-                        break
+                event_type = event.type
+                
+                if event_type == "audio":
+                    # Collect audio chunks
+                    response_audio_chunks.append(event.audio.data)
+                
+                elif event_type == "handoff":
+                    # Track agent handoff
+                    active_agent = event.to_agent.name
+                    print(f"[INFO] Handoff: {event.from_agent.name} → {active_agent}")
+                
+                elif event_type == "agent_start":
+                    # Track which agent is responding
+                    active_agent = event.agent.name
+                    print(f"[INFO] Agent started: {active_agent}")
+                
+                elif event_type == "history_updated":
+                    # Extract transcript from history
+                    for item in event.history:
+                        if hasattr(item, 'role') and item.role == 'assistant':
+                            if hasattr(item, 'content'):
+                                for content in item.content if isinstance(item.content, list) else [item.content]:
+                                    if hasattr(content, 'text') and content.text:
+                                        response_text += content.text
+                
+                elif event_type == "audio_end":
+                    # Response complete
+                    print(f"[INFO] Response complete: {response_text[:100] if response_text else 'no transcript'}...")
+                    break
+                
+                elif event_type == "error":
+                    print(f"[ERROR] Realtime API error: {event.error if hasattr(event, 'error') else 'unknown'}")
+                    break
             
             # Combine audio chunks and convert to Gradio format
             if response_audio_chunks:
