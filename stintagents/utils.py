@@ -279,11 +279,13 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                                     break
                         print(f"[DEBUG] Last user request: '{last_user_message}'")
                     
-                    # Trigger the new agent to introduce themselves and address the user's request
+                    # Trigger the new agent to respond after handoff
+                    # Since we have server_vad with create_response=True, we need to send some audio
+                    # to trigger the turn detection system. Send a very short silence to activate it.
                     try:
-                        # Create response to trigger the new agent to speak
-                        # The agent should have access to conversation history via the context
-                        await session.create_response()
+                        # Send a brief silence (200ms at 24kHz = 4800 samples) to trigger VAD
+                        silence = np.zeros(4800, dtype=np.int16)
+                        await session.send_audio(silence.tobytes(), commit=True)
                         print(f"[INFO] Triggered response from {to_agent} after handoff")
                     except Exception as e:
                         print(f"[WARN] Failed to trigger response: {e}")
