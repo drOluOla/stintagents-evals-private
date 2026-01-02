@@ -118,6 +118,11 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             
             print(f"[INFO] Processing {len(pcm16_audio)} samples with {realtime_agent.name}")
             
+            # Get voice settings from agent persona
+            agent_persona = config.AGENT_PERSONAS.get(realtime_agent.name, {})
+            voice = agent_persona.get("voice", "alloy")
+            speed = agent_persona.get("speed", 1.0)
+            
             # Create RealtimeRunner and start session
             runner = RealtimeRunner(
                 starting_agent=realtime_agent,
@@ -125,6 +130,8 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     "model_settings": {
                         "model_name": "gpt-4o-realtime-preview-2024-12-17",
                         "modalities": ["audio"],
+                        "voice": voice,
+                        "speed": speed,
                         "input_audio_format": "pcm16",
                         "output_audio_format": "pcm16",
                         "turn_detection": {
