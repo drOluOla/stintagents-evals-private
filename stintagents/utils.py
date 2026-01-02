@@ -10,7 +10,6 @@ import json
 import base64
 from typing import Optional, Tuple
 from scipy import signal
-from openai import AsyncOpenAI
 
 import stintagents.config as config
 
@@ -32,10 +31,8 @@ def get_or_create_event_loop():
     return _event_loop
 
 # ==============================================================================
-# WHISPER INITIALIZATION (KEPT FOR FALLBACK/EVALUATION)
+# SESSION MANAGEMENT
 # ==============================================================================
-async_openai_client = AsyncOpenAI()
-
 def get_or_create_session(conversation_id: str):
     """Get or create a session - SQLiteSession should be imported in notebook"""
     if conversation_id not in config.CONVERSATION_SESSIONS:
