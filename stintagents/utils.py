@@ -290,16 +290,6 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                                             response_text = content.transcript
                                             print(f"[TRANSCRIPT] {active_agent} said: {response_text}")
                 
-                elif event_type == "audio_end":
-                    # Response complete - show full transcript for debugging
-                    if user_transcript:
-                        print(f"[SUMMARY] User input: '{user_transcript}'")
-                    if response_text:
-                        print(f"[SUMMARY] {active_agent} response: '{response_text}'")
-                    else:
-                        print(f"[WARN] No transcript captured for {active_agent}'s response")
-                    break
-                
                 elif event_type == "error":
                     print(f"[ERROR] Realtime API error: {event.error if hasattr(event, 'error') else 'unknown'}")
                     break
