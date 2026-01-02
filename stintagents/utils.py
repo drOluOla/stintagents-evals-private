@@ -123,6 +123,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             
             session = RealtimeSession(
                 agent=realtime_agent,
+                context=None,
                 model="gpt-4o-realtime-preview-2024-12-17"
             )
             
