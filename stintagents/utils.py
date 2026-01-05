@@ -203,8 +203,9 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     active_agent = to_agent
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
-                    # Use the tracked user input from this conversation
-                    print(f"[DEBUG] User's request that triggered handoff: '{last_user_input}'")
+                    # Use the most recent user input, or create a generic prompt based on the agent
+                    handoff_message = last_user_input if last_user_input else "I need help"
+                    print(f"[DEBUG] Message to send to {to_agent}: '{handoff_message}'")
                     
                     # Close current session gracefully
                     print(f"[INFO] Closing session to switch voice for {to_agent}...")
@@ -260,24 +261,29 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     print(f"[INFO] New session active for {to_agent}")
                     
-                    # Trigger immediate response by re-sending the user's request
-                    # The new agent will hear the user's message and respond naturally
+                    # Trigger immediate response by sending a message to the new agent
+                    # The new agent will hear the message and respond naturally
                     try:
-                        if last_user_input:
-                            # Re-send the user's original message to the new agent
-                            await session.send_message(last_user_input)
-                            print(f"[INFO] Re-sent user message to {to_agent}: '{last_user_input}'")
-                        else:
-                            # Fallback: send a generic trigger
-                            await session.send_message("Hello, I need help")
-                            print(f"[INFO] Sent trigger message to {to_agent}")
+                        # Send the handoff message to trigger the agent
+                        await session.send_message(handoff_message)
+                        print(f"[INFO] Sent message to {to_agent}: '{handoff_message}'")
+                        
+                        # Give the model a moment to process before we start listening for events
+                        await asyncio.sleep(0.3)
                         
                     except Exception as e:
                         print(f"[WARN] Failed to trigger immediate response: {e}")
                         import traceback
                         traceback.print_exc()
                     
-                    # Reset timeout and continue listening on new session
+                    # Clear response collection for new agent's response
+                    response_audio_chunks = []
+                    response_text = ""
+                    
+                    # Reset timeout and continue listening on new session for the agent's response
+                    start_time = asyncio.get_event_loop().time()
+                    # Don't break - continue in the loop to collect the new agent's response
+                    continue
                     start_time = asyncio.get_event_loop().time()
                     continue
                 
@@ -296,12 +302,12 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                                     if item.role == 'user':
                                         if hasattr(content, 'transcript') and content.transcript:
                                             user_transcript = content.transcript
-                                        last_user_input = content.transcript  # Track for potential handoffs
-                                        print(f"[TRANSCRIPT] User said: {user_transcript}")
-                                    elif hasattr(content, 'text') and content.text:
-                                        user_transcript = content.text
-                                        last_user_input = content.text  # Track for potential handoffs
-                                        print(f"[TRANSCRIPT] User said: {user_transcript}")
+                                            last_user_input = content.transcript  # Track for potential handoffs
+                                            print(f"[TRANSCRIPT] User said: {user_transcript}")
+                                        elif hasattr(content, 'text') and content.text:
+                                            user_transcript = content.text
+                                            last_user_input = content.text  # Track for potential handoffs
+                                            print(f"[TRANSCRIPT] User said: {user_transcript}")
                                     # Assistant response transcript
                                     elif item.role == 'assistant':
                                         if hasattr(content, 'text') and content.text:
