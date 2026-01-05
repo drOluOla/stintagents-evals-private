@@ -315,18 +315,13 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     last_seen_history_len = 0
                     
                     # Trigger the agent to generate a response immediately
-                    # Send silence audio then commit to trigger turn detection
+                    # Send silence audio with commit to trigger turn detection
                     print(f"[INFO] Triggering {to_agent} to respond to: '{last_user_request[:50]}...'")
                     try:
-                        # Send 200ms of silence at 24kHz (4800 samples) - must exceed 100ms minimum
-                        silence_samples = np.zeros(4800, dtype=np.int16)
+                        # Send 150ms of silence at 24kHz (3600 samples) with commit=True
+                        silence_samples = np.zeros(3600, dtype=np.int16)
                         silence_bytes = silence_samples.tobytes()
-                        # First send audio without commit
-                        await session.send_audio(silence_bytes, commit=False)
-                        # Small delay to ensure buffer is populated
-                        await asyncio.sleep(0.05)
-                        # Then commit the buffer to trigger response
-                        await session.send_audio(b'', commit=True)
+                        await session.send_audio(silence_bytes, commit=True)
                     except Exception as trigger_err:
                         print(f"[WARN] Could not trigger response: {trigger_err}")
                     
