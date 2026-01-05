@@ -4,6 +4,7 @@ Configuration and constants for StintAgents Voice AI
 
 
 # Default agent personas
+# Valid voices: 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'
 _DEFAULT_AGENT_PERSONAS = {
     "HR Manager": {
         "voice": "alloy",
@@ -14,7 +15,7 @@ _DEFAULT_AGENT_PERSONAS = {
         "color": "#3b82f6"
     },
     "AI Colleague": {
-        "voice": "nova",
+        "voice": "shimmer",
         "speed": 1.0,
         "emoji": "🤖",
         "description": "AI Assistant",
@@ -30,7 +31,7 @@ _DEFAULT_AGENT_PERSONAS = {
         "color": "#10b981"
     },
     "Line Manager": {
-        "voice": "fable",
+        "voice": "verse",
         "speed": 1.0,
         "emoji": "📊",
         "description": "Team Lead",

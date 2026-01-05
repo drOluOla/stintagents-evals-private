@@ -195,6 +195,24 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     # Collect audio chunks
                     response_audio_chunks.append(event.audio.data)
                 
+                elif event_type == "tool_start":
+                    # SDK executes tools automatically - just log for visibility
+                    tool_name = event.tool.name if hasattr(event, 'tool') else 'unknown'
+                    tool_args = event.arguments if hasattr(event, 'arguments') else '{}'
+                    print(f"[TOOL] {active_agent} calling: {tool_name} with args: {tool_args}")
+                    # Reset timeout while tool is executing
+                    start_time = asyncio.get_event_loop().time()
+                    continue
+                
+                elif event_type == "tool_end":
+                    # Tool execution completed by SDK - log the result
+                    tool_name = event.tool.name if hasattr(event, 'tool') else 'unknown'
+                    tool_output = event.output if hasattr(event, 'output') else 'no output'
+                    print(f"[TOOL] {tool_name} result: {str(tool_output)[:200]}")
+                    # Reset timeout after tool completes
+                    start_time = asyncio.get_event_loop().time()
+                    continue
+                
                 elif event_type == "handoff":
                     # Track agent handoff - restart session to enable unique voice per agent
                     from_agent = event.from_agent.name
