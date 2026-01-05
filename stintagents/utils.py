@@ -195,37 +195,63 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     response_audio_chunks.append(event.audio.data)
                 
                 elif event_type == "handoff":
-                    # Track agent handoff - need to restart session for voice change
+                    # Track agent handoff - restart session to enable unique voice per agent
                     from_agent = event.from_agent.name
                     to_agent_obj = event.to_agent
                     to_agent = to_agent_obj.name
                     active_agent = to_agent
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
-                    # Get conversation history before closing session
-                    conversation_history = list(session._history) if hasattr(session, '_history') else []
-                    print(f"[INFO] Preserving {len(conversation_history)} history items")
+                    # Capture conversation history before closing session
+                    conversation_history = []
+                    if hasattr(session, 'model') and hasattr(session.model, '_conversation_items'):
+                        conversation_history = list(session.model._conversation_items)
+                    print(f"[INFO] Preserving {len(conversation_history)} conversation items")
                     
-                    # Close current session and create new one with new agent
-                    print(f"[INFO] Restarting session for voice change...")
-                    await session.close()
+                    # Extract last user message for context
+                    last_user_message = ""
+                    for item in reversed(conversation_history):
+                        if hasattr(item, 'role') and item.role == 'user':
+                            if hasattr(item, 'content'):
+                                contents = item.content if isinstance(item.content, list) else [item.content]
+                                for content in contents:
+                                    if hasattr(content, 'transcript') and content.transcript:
+                                        last_user_message = content.transcript
+                                        break
+                                    elif hasattr(content, 'text') and content.text:
+                                        last_user_message = content.text
+                                        break
+                            if last_user_message:
+                                break
+                    
+                    print(f"[DEBUG] Last user message: '{last_user_message}'")
+                    
+                    # Close current session gracefully
+                    print(f"[INFO] Closing session to switch voice for {to_agent}...")
+                    try:
+                        await session.close()
+                    except:
+                        pass
                     
                     with _SESSION_LOCK:
                         if session_key in _REALTIME_SESSIONS:
                             del _REALTIME_SESSIONS[session_key]
                     
-                    # Get new agent's voice settings
+                    # Get new agent's voice settings from persona
                     new_persona = config.AGENT_PERSONAS.get(to_agent, {})
                     new_voice = new_persona.get("voice", "alloy")
                     new_speed = new_persona.get("speed", 1.0)
                     
-                    # Create new session with new agent and pass conversation history in context
+                    print(f"[INFO] Starting new session with voice '{new_voice}' for {to_agent}")
+                    
+                    # Create new runner with the target agent
+                    from agents.realtime import RealtimeRunner
                     runner = RealtimeRunner(
                         starting_agent=to_agent_obj,
                         config={
                             "model_settings": {
                                 "model_name": "gpt-4o-realtime-preview-2024-12-17",
-                                "modalities": ["audio"],
+                                "modalities": ["audio", "text"],
                                 "voice": new_voice,
                                 "speed": new_speed,
                                 "input_audio_format": "pcm16",
@@ -244,52 +270,40 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         }
                     )
                     
-                    # Run with context including conversation history
-                    context = {
-                        "conversation_id": conversation_id,
-                        "history": conversation_history
-                    }
-                    session = await runner.run(context=context)
+                    # Start new session
+                    session = await runner.run(context={"conversation_id": conversation_id})
                     await session.__aenter__()
                     
-                    # Verify history was preserved
-                    if conversation_history:
-                        print(f"[INFO] Restored {len(conversation_history)} history items to new session")
-                        print(f"[DEBUG] Last history item: {conversation_history[-1] if conversation_history else 'None'}")
-                    
+                    # Store new session
                     with _SESSION_LOCK:
                         _REALTIME_SESSIONS[session_key] = session
                     
-                    print(f"[INFO] Session restarted with voice '{new_voice}' for {to_agent}")
+                    print(f"[INFO] New session active for {to_agent}")
                     
-                    # Extract the last user message to provide context to the new agent
-                    last_user_message = ""
-                    if conversation_history:
-                        for item in reversed(conversation_history):
-                            if hasattr(item, 'role') and item.role == 'user':
-                                if hasattr(item, 'content'):
-                                    for content in (item.content if isinstance(item.content, list) else [item.content]):
-                                        if hasattr(content, 'transcript') and content.transcript:
-                                            last_user_message = content.transcript
-                                            break
-                                        elif hasattr(content, 'text') and content.text:
-                                            last_user_message = content.text
-                                            break
-                                if last_user_message:
-                                    break
-                        print(f"[DEBUG] Last user request: '{last_user_message}'")
-                    
-                    # Trigger the new agent to respond immediately after handoff
-                    # Use the response method from the session to force an immediate response
+                    # Trigger immediate response by sending a system-like prompt
+                    # This makes the agent aware of the handoff context and prompts them to speak
                     try:
-                        await session.response()
-                        print(f"[INFO] Triggered response from {to_agent} after handoff")
+                        from agents.realtime import RealtimeUserInput
+                        
+                        # Create a context message that triggers the agent to respond
+                        handoff_context = (
+                            f"[You have just been handed off from {from_agent}. "
+                            f"The user's last message was: '{last_user_message}'. "
+                            f"Please respond immediately and naturally as {to_agent}, "
+                            f"acknowledging the context and providing relevant information.]"
+                        )
+                        
+                        await session.send_message(RealtimeUserInput(text=handoff_context))
+                        print(f"[INFO] Sent handoff context to trigger {to_agent}'s immediate response")
+                        
                     except Exception as e:
-                        print(f"[WARN] Failed to trigger response: {e}")
+                        print(f"[WARN] Failed to trigger immediate response: {e}")
+                        import traceback
+                        traceback.print_exc()
                     
-                    # Continue listening on new session - break out and restart the event loop
-                    start_time = asyncio.get_event_loop().time()  # Reset timeout
-                    continue  # This will re-enter the async for loop with the new session
+                    # Reset timeout and continue listening on new session
+                    start_time = asyncio.get_event_loop().time()
+                    continue
                 
                 elif event_type == "agent_start":
                     # Track which agent is responding
