@@ -232,7 +232,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         config={
                             "model_settings": {
                                 "model_name": "gpt-4o-realtime-preview-2024-12-17",
-                                "modalities": ["audio", "text"],
+                                "modalities": ["audio"],
                                 "voice": new_voice,
                                 "speed": new_speed,
                                 "input_audio_format": "pcm16",
