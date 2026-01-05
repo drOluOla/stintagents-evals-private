@@ -173,7 +173,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             response_text = ""
             user_transcript = ""
             active_agent = realtime_agent.name
-            all_user_messages = []  # Track ALL user messages to get the latest one at handoff
+            last_seen_history_len = 0  # Track history length to only process new items
             
             # Send audio input - don't commit, let turn detection handle it
             if len(audio_bytes) > 0:
@@ -203,19 +203,14 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     active_agent = to_agent
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
-                    # Use the current user_transcript which should have the latest user input
-                    handoff_message = user_transcript if user_transcript else "Hello"
-                    print(f"[DEBUG] Sending user's message to {to_agent}: '{handoff_message}'")
-                    
                     # Close current session gracefully
                     print(f"[INFO] Closing session to switch voice for {to_agent}...")
                     try:
                         await session.close()
-                        # Wait for the connection to fully close
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(0.5)
                     except Exception as close_err:
                         print(f"[WARN] Error during session close: {close_err}")
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(0.5)
                     
                     with _SESSION_LOCK:
                         if session_key in _REALTIME_SESSIONS:
@@ -230,13 +225,6 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     # Create new runner with the target agent
                     from agents.realtime import RealtimeRunner
-                    
-                    # Build context with handoff information
-                    handoff_context = {
-                        "conversation_id": conversation_id,
-                        "handoff_from": from_agent,
-                        "user_message": handoff_message
-                    }
                     
                     runner = RealtimeRunner(
                         starting_agent=to_agent_obj,
@@ -262,8 +250,8 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         }
                     )
                     
-                    # Start new session with handoff context
-                    session = await runner.run(context=handoff_context)
+                    # Start new session - SDK handles context internally
+                    session = await runner.run(context={"conversation_id": conversation_id})
                     await session.__aenter__()
                     
                     # Store new session
@@ -272,24 +260,10 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     print(f"[INFO] New session active for {to_agent}")
                     
-                    # Trigger immediate response by sending user's message
-                    # The agent should respond based on their instructions
-                    try:
-                        # Send the user's latest message to the new agent
-                        await session.send_message(handoff_message)
-                        print(f"[INFO] Sent message to {to_agent}: '{handoff_message}'")
-                        
-                        # Give the model time to process and start generating
-                        await asyncio.sleep(0.5)
-                        
-                    except Exception as e:
-                        print(f"[WARN] Failed to send message: {e}")
-                        import traceback
-                        traceback.print_exc()
-                    
                     # Clear response collection for new agent's response
                     response_audio_chunks = []
                     response_text = ""
+                    last_seen_history_len = 0
                     
                     # Reset timeout and continue listening for the agent's audio response
                     start_time = asyncio.get_event_loop().time()
@@ -302,29 +276,27 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     print(f"[INFO] Agent started: {active_agent}")
                 
                 elif event_type == "history_updated":
-                    # Extract transcripts from history (both user and assistant)
-                    for item in event.history:
-                        if hasattr(item, 'role'):
-                            if hasattr(item, 'content'):
-                                for content in item.content if isinstance(item.content, list) else [item.content]:
-                                    # User input transcript
-                                    if item.role == 'user':
-                                        if hasattr(content, 'transcript') and content.transcript:
-                                            user_transcript = content.transcript
-                                            all_user_messages.append(content.transcript)  # Track all user messages
-                                            print(f"[TRANSCRIPT] User said: {user_transcript}")
-                                        elif hasattr(content, 'text') and content.text:
-                                            user_transcript = content.text
-                                            all_user_messages.append(content.text)  # Track all user messages
-                                            print(f"[TRANSCRIPT] User said: {user_transcript}")
-                                    # Assistant response transcript
-                                    elif item.role == 'assistant':
-                                        if hasattr(content, 'text') and content.text:
-                                            response_text = content.text
-                                            print(f"[TRANSCRIPT] {active_agent} said: {response_text}")
-                                        elif hasattr(content, 'transcript') and content.transcript:
-                                            response_text = content.transcript
-                                            print(f"[TRANSCRIPT] {active_agent} said: {response_text}")
+                    # Only process NEW history items to avoid duplicates
+                    history = event.history
+                    new_items = history[last_seen_history_len:]
+                    last_seen_history_len = len(history)
+                    
+                    for item in new_items:
+                        if hasattr(item, 'role') and hasattr(item, 'content'):
+                            contents = item.content if isinstance(item.content, list) else [item.content]
+                            for content in contents:
+                                # User input transcript
+                                if item.role == 'user':
+                                    transcript = getattr(content, 'transcript', None) or getattr(content, 'text', None)
+                                    if transcript:
+                                        user_transcript = transcript
+                                        print(f"[TRANSCRIPT] User said: {user_transcript}")
+                                # Assistant response transcript
+                                elif item.role == 'assistant':
+                                    transcript = getattr(content, 'text', None) or getattr(content, 'transcript', None)
+                                    if transcript:
+                                        response_text = transcript
+                                        print(f"[TRANSCRIPT] {active_agent} said: {response_text}")
                 
                 elif event_type == "audio_end":
                     # Response complete - show full transcript for debugging
