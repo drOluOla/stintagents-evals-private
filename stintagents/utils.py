@@ -297,10 +297,67 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         except Exception as fallback_err:
                             print(f"[WARN] Fallback trigger also failed: {fallback_err}")
                     
-                    # Reset timeout and continue listening for the agent's audio response
+                    # Reset timeout and start NEW event loop for the new session
+                    # (The original iterator is bound to the old closed session)
                     start_time = asyncio.get_event_loop().time()
-                    print(f"[INFO] Waiting for {to_agent} to respond...")
-                    continue  # Continue loop to collect audio from new agent
+                    print(f"[INFO] Listening for {to_agent}'s response...")
+                    
+                    async for new_event in session:
+                        # Check timeout
+                        if asyncio.get_event_loop().time() - start_time > timeout_seconds:
+                            print("[WARN] Response timeout for new agent")
+                            break
+                        
+                        new_event_type = new_event.type
+                        
+                        if new_event_type == "audio":
+                            response_audio_chunks.append(new_event.audio.data)
+                        
+                        elif new_event_type == "agent_start":
+                            active_agent = new_event.agent.name
+                            print(f"[INFO] Agent started: {active_agent}")
+                        
+                        elif new_event_type == "tool_start":
+                            tool_name = new_event.tool.name if hasattr(new_event, 'tool') else 'unknown'
+                            tool_args = new_event.arguments if hasattr(new_event, 'arguments') else '{}'
+                            print(f"[TOOL] {active_agent} calling: {tool_name} with args: {tool_args}")
+                            start_time = asyncio.get_event_loop().time()
+                        
+                        elif new_event_type == "tool_end":
+                            tool_name = new_event.tool.name if hasattr(new_event, 'tool') else 'unknown'
+                            tool_output = new_event.output if hasattr(new_event, 'output') else 'no output'
+                            print(f"[TOOL] {tool_name} result: {str(tool_output)[:200]}")
+                            start_time = asyncio.get_event_loop().time()
+                        
+                        elif new_event_type == "history_updated":
+                            history = new_event.history
+                            new_items = history[last_seen_history_len:]
+                            last_seen_history_len = len(history)
+                            
+                            for item in new_items:
+                                if hasattr(item, 'role') and hasattr(item, 'content'):
+                                    contents = item.content if isinstance(item.content, list) else [item.content]
+                                    for content in contents:
+                                        if item.role == 'assistant':
+                                            transcript = getattr(content, 'text', None) or getattr(content, 'transcript', None)
+                                            if transcript:
+                                                response_text = transcript
+                                                print(f"[TRANSCRIPT] {active_agent} said: {response_text}")
+                        
+                        elif new_event_type == "audio_end":
+                            if response_text:
+                                print(f"[SUMMARY] {active_agent} response: '{response_text}'")
+                            else:
+                                print(f"[WARN] No transcript captured for {active_agent}'s response")
+                            break
+                        
+                        elif new_event_type == "error":
+                            print(f"[ERROR] Realtime API error: {new_event.error if hasattr(new_event, 'error') else 'unknown'}")
+                            break
+                    
+                    # After new agent responds, break out of the original loop
+                    # (we've already collected their response)
+                    break
                 
                 elif event_type == "agent_start":
                     # Track which agent is responding
