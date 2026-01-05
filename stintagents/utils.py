@@ -221,10 +221,20 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     to_agent = to_agent_obj.name
                     active_agent = to_agent
                     
-                    # Extract handoff context - why was this handoff initiated?
-                    handoff_context = ""
-                    if hasattr(event, 'context') and event.context:
-                        handoff_context = str(event.context)
+                    # Extract the most recent user request from the event history if available
+                    # This ensures we capture what triggered the handoff
+                    if hasattr(event, 'history') and event.history:
+                        for item in reversed(event.history):
+                            if hasattr(item, 'role') and item.role == 'user':
+                                if hasattr(item, 'content'):
+                                    contents = item.content if isinstance(item.content, list) else [item.content]
+                                    for content in contents:
+                                        transcript = getattr(content, 'transcript', None) or getattr(content, 'text', None)
+                                        if transcript:
+                                            last_user_request = transcript
+                                            print(f"[CONTEXT] Handoff triggered by user request: '{last_user_request}'")
+                                            break
+                                    break
                     
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
