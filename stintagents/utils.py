@@ -227,10 +227,10 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     pending_transcript = None
                     wait_start = asyncio.get_event_loop().time()
                     
-                    # Collect events for up to 2 seconds to catch the triggering transcript
+                    # Collect events for up to 1 second to catch the triggering transcript
                     async for pending_event in session:
                         elapsed = asyncio.get_event_loop().time() - wait_start
-                        if elapsed > 2.0:
+                        if elapsed > 1.0:
                             break
                         
                         if pending_event.type == "history_updated":
@@ -276,10 +276,10 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     print(f"[INFO] Closing session to switch voice for {to_agent}...")
                     try:
                         await session.close()
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.1)
                     except Exception as close_err:
                         print(f"[WARN] Error during session close: {close_err}")
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.1)
                     
                     with _SESSION_LOCK:
                         if session_key in _REALTIME_SESSIONS:
