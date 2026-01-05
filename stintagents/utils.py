@@ -227,26 +227,62 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     pending_transcript = None
                     wait_start = asyncio.get_event_loop().time()
                     
-                    # Collect events for up to 1 second to catch the triggering transcript
+                    # Collect events for up to 2 seconds to catch the triggering transcript
                     async for pending_event in session:
-                        if asyncio.get_event_loop().time() - wait_start > 1.0:
+                        elapsed = asyncio.get_event_loop().time() - wait_start
+                        if elapsed > 2.0:
+                            print(f"[DEBUG] Timeout waiting for transcript after {elapsed:.2f}s")
                             break
+                        
+                        print(f"[DEBUG] Pending event type: {pending_event.type}")
                         
                         if pending_event.type == "history_updated":
                             history = pending_event.history
+                            print(f"[DEBUG] History has {len(history)} items")
                             for item in reversed(history):
                                 if hasattr(item, 'role') and item.role == 'user':
                                     if hasattr(item, 'content'):
                                         contents = item.content if isinstance(item.content, list) else [item.content]
                                         for content in contents:
                                             transcript = getattr(content, 'transcript', None) or getattr(content, 'text', None)
+                                            print(f"[DEBUG] Found user transcript: '{transcript}'")
                                             if transcript and transcript != user_transcript:
                                                 pending_transcript = transcript
                                                 print(f"[TRANSCRIPT] User said (pending): {pending_transcript}")
                                         break
                             if pending_transcript:
                                 break
+                        
+                        elif pending_event.type == "history_added":
+                            # New single item added to history
+                            item = pending_event.item
+                            if hasattr(item, 'role') and item.role == 'user':
+                                if hasattr(item, 'content'):
+                                    contents = item.content if isinstance(item.content, list) else [item.content]
+                                    for content in contents:
+                                        transcript = getattr(content, 'transcript', None) or getattr(content, 'text', None)
+                                        print(f"[DEBUG] history_added user transcript: '{transcript}'")
+                                        if transcript and transcript != user_transcript:
+                                            pending_transcript = transcript
+                                            print(f"[TRANSCRIPT] User said (added): {pending_transcript}")
+                            if pending_transcript:
+                                break
+                        
+                        elif pending_event.type == "raw":
+                            # Check raw events for input_audio_transcription
+                            raw_data = pending_event.data if hasattr(pending_event, 'data') else None
+                            if raw_data:
+                                raw_type = getattr(raw_data, 'type', None)
+                                print(f"[DEBUG] Raw event type: {raw_type}")
+                                if raw_type == "conversation.item.input_audio_transcription.completed":
+                                    transcript = getattr(raw_data, 'transcript', None)
+                                    if transcript:
+                                        print(f"[DEBUG] Raw transcript: '{transcript}'")
+                                        pending_transcript = transcript
+                                        break
+                        
                         elif pending_event.type in ["audio_end", "error"]:
+                            print(f"[DEBUG] Breaking on {pending_event.type}")
                             break
                     
                     # Use the most recent transcript (pending or existing)
