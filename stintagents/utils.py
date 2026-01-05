@@ -305,10 +305,13 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     last_seen_history_len = 0
                     
                     # Trigger the agent to generate a response immediately
-                    # Using model.send_event to request a response without adding to conversation history
+                    # Send brief silence audio then commit to trigger turn detection
                     print(f"[INFO] Triggering {to_agent} to respond to: '{last_user_request[:50]}...'")
                     try:
-                        await session.model.send_event({"type": "response.create"})
+                        # Send minimal silence (100ms of silence at 24kHz = 2400 samples)
+                        silence_samples = np.zeros(2400, dtype=np.int16)
+                        silence_bytes = silence_samples.tobytes()
+                        await session.send_audio(silence_bytes, commit=True)
                     except Exception as trigger_err:
                         print(f"[WARN] Could not trigger response: {trigger_err}")
                     
