@@ -221,29 +221,29 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     to_agent = to_agent_obj.name
                     active_agent = to_agent
                     
+                    # Debug: print all event attributes to find where the trigger context is
+                    print(f"[DEBUG] Handoff event attributes: {[a for a in dir(event) if not a.startswith('_')]}")
+                    
                     # Try to extract the user's request that triggered the handoff
-                    # Check various possible attributes on the handoff event
                     handoff_trigger = None
                     
-                    # Check if there's input_transcript on the event
-                    if hasattr(event, 'input_transcript') and event.input_transcript:
-                        handoff_trigger = event.input_transcript
-                    
-                    # Check for any context/reason fields
-                    if not handoff_trigger:
-                        for attr in ['context', 'reason', 'message', 'user_message', 'trigger']:
-                            if hasattr(event, attr) and getattr(event, attr):
-                                handoff_trigger = str(getattr(event, attr))
+                    # Check all possible attributes on the handoff event
+                    for attr in ['input_transcript', 'transcript', 'context', 'reason', 'message', 'user_input', 'text']:
+                        if hasattr(event, attr):
+                            val = getattr(event, attr)
+                            if val:
+                                handoff_trigger = str(val)
+                                print(f"[DEBUG] Found trigger in event.{attr}: {handoff_trigger}")
                                 break
                     
-                    # Use user_transcript if we captured it earlier in this turn
+                    # Use user_transcript if we captured it during this turn
                     if not handoff_trigger and user_transcript:
                         handoff_trigger = user_transcript
                     
-                    # Update last_user_request if we found something
+                    # Update last_user_request if we found something new
                     if handoff_trigger:
                         last_user_request = handoff_trigger
-                        print(f"[CONTEXT] Handoff triggered by: '{last_user_request}'")
+                        print(f"[CONTEXT] Handoff context: '{last_user_request}'")
                     
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
@@ -324,23 +324,15 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     last_seen_history_len = 0
                     
                     # Trigger the agent to generate a response immediately
-                    # Use text input which won't have buffer issues
-                    trigger_message = last_user_request if last_user_request else "Please introduce yourself and help the user."
+                    # The context is already in the agent's cloned instructions
+                    trigger_message = last_user_request if last_user_request else "Please help the user with their request."
                     print(f"[INFO] Triggering {to_agent} to respond to: '{trigger_message[:50]}...'")
                     try:
-                        # Send as text input - this triggers response without audio buffer issues
-                        await session.send_message({"type": "input_text", "text": trigger_message})
+                        # Send as simple string - the SDK will format it properly
+                        await session.send_message(trigger_message)
                     except Exception as trigger_err:
-                        print(f"[WARN] Could not trigger via text, trying audio: {trigger_err}")
-                        try:
-                            # Fallback: send longer silence with multiple chunks
-                            for _ in range(3):
-                                silence_samples = np.zeros(4800, dtype=np.int16)  # 200ms each
-                                await session.send_audio(silence_samples.tobytes(), commit=False)
-                                await asyncio.sleep(0.1)
-                            await session.send_audio(np.zeros(2400, dtype=np.int16).tobytes(), commit=True)
-                        except Exception as audio_err:
-                            print(f"[WARN] Audio trigger also failed: {audio_err}")
+                        print(f"[WARN] Text trigger failed: {trigger_err}")
+                        # The agent should still respond based on its instructions
                     
                     # Reset timeout and start NEW event loop for the new session
                     # (The original iterator is bound to the old closed session)
