@@ -283,6 +283,20 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     response_text = ""
                     last_seen_history_len = 0
                     
+                    # Trigger the new agent to speak immediately after handoff
+                    # Send a text message prompting the agent to introduce themselves
+                    print(f"[INFO] Triggering {to_agent} to speak...")
+                    try:
+                        # Use send_message to prompt the new agent to start speaking
+                        await session.send_message(f"You have just been handed this conversation. Please introduce yourself briefly and continue helping the user.")
+                    except Exception as trigger_err:
+                        print(f"[WARN] Could not trigger agent to speak: {trigger_err}")
+                        # Fallback: try using the underlying model's send_event for response.create
+                        try:
+                            await session.model.send_event({"type": "response.create"})
+                        except Exception as fallback_err:
+                            print(f"[WARN] Fallback trigger also failed: {fallback_err}")
+                    
                     # Reset timeout and continue listening for the agent's audio response
                     start_time = asyncio.get_event_loop().time()
                     print(f"[INFO] Waiting for {to_agent} to respond...")
