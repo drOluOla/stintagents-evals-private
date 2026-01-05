@@ -221,40 +221,41 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     to_agent = to_agent_obj.name
                     active_agent = to_agent
                     
-                    # Debug: check the info field which may contain handoff context
-                    if hasattr(event, 'info') and event.info:
-                        print(f"[DEBUG] Handoff info: {event.info}")
-                        print(f"[DEBUG] Handoff info type: {type(event.info)}")
-                        if hasattr(event.info, '__dict__'):
-                            print(f"[DEBUG] Handoff info attrs: {event.info.__dict__}")
+                    # Wait briefly and collect any pending transcript events
+                    # The transcript for the triggering message often arrives after the handoff event
+                    print(f"[INFO] Handoff initiated: {from_agent} → {to_agent}, waiting for pending transcripts...")
+                    pending_transcript = None
+                    wait_start = asyncio.get_event_loop().time()
                     
-                    # Try to extract the user's request that triggered the handoff from info
-                    handoff_trigger = None
+                    # Collect events for up to 1 second to catch the triggering transcript
+                    async for pending_event in session:
+                        if asyncio.get_event_loop().time() - wait_start > 1.0:
+                            break
+                        
+                        if pending_event.type == "history_updated":
+                            history = pending_event.history
+                            for item in reversed(history):
+                                if hasattr(item, 'role') and item.role == 'user':
+                                    if hasattr(item, 'content'):
+                                        contents = item.content if isinstance(item.content, list) else [item.content]
+                                        for content in contents:
+                                            transcript = getattr(content, 'transcript', None) or getattr(content, 'text', None)
+                                            if transcript and transcript != user_transcript:
+                                                pending_transcript = transcript
+                                                print(f"[TRANSCRIPT] User said (pending): {pending_transcript}")
+                                        break
+                            if pending_transcript:
+                                break
+                        elif pending_event.type in ["audio_end", "error"]:
+                            break
                     
-                    # Check the info object for context
-                    if hasattr(event, 'info') and event.info:
-                        info = event.info
-                        # Try to get input_transcript or similar from info
-                        for attr in ['input_transcript', 'transcript', 'user_input', 'message', 'text', 'content']:
-                            if hasattr(info, attr):
-                                val = getattr(info, attr)
-                                if val:
-                                    handoff_trigger = str(val)
-                                    print(f"[DEBUG] Found trigger in info.{attr}: {handoff_trigger}")
-                                    break
-                        # If info is a string or has string representation with useful content
-                        if not handoff_trigger and str(info) and str(info) != str(type(info)):
-                            handoff_trigger = str(info)
+                    # Use the most recent transcript (pending or existing)
+                    if pending_transcript:
+                        last_user_request = pending_transcript
+                    elif user_transcript:
+                        last_user_request = user_transcript
                     
-                    # Fallback to user_transcript from history_updated events
-                    if not handoff_trigger and user_transcript:
-                        handoff_trigger = user_transcript
-                    
-                    # Update last_user_request if we found something new
-                    if handoff_trigger:
-                        last_user_request = handoff_trigger
-                        print(f"[CONTEXT] Handoff context: '{last_user_request}'")
-                    
+                    print(f"[CONTEXT] Handoff context: '{last_user_request}'")
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
                     # Close current session gracefully
