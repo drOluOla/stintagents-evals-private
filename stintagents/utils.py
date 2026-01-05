@@ -174,6 +174,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
             user_transcript = ""
             active_agent = realtime_agent.name
             last_seen_history_len = 0  # Track history length to only process new items
+            last_user_request = ""  # Track the user's last request for handoff context
             
             # Send audio input - don't commit, let turn detection handle it
             if len(audio_bytes) > 0:
@@ -219,6 +220,12 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     to_agent_obj = event.to_agent
                     to_agent = to_agent_obj.name
                     active_agent = to_agent
+                    
+                    # Extract handoff context - why was this handoff initiated?
+                    handoff_context = ""
+                    if hasattr(event, 'context') and event.context:
+                        handoff_context = str(event.context)
+                    
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
                     # Close current session gracefully
@@ -284,11 +291,23 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     last_seen_history_len = 0
                     
                     # Trigger the new agent to speak immediately after handoff
-                    # Send a text message prompting the agent to introduce themselves
-                    print(f"[INFO] Triggering {to_agent} to speak...")
+                    # Pass conversation context so they know what to respond to
+                    print(f"[INFO] Triggering {to_agent} to speak with context...")
+                    
+                    # Build context message for the new agent
+                    context_parts = []
+                    if last_user_request:
+                        context_parts.append(f"The user just asked: \"{last_user_request}\"")
+                    if handoff_context:
+                        context_parts.append(f"Handoff reason: {handoff_context}")
+                    context_parts.append(f"You were handed this conversation from {from_agent}.")
+                    
+                    context_message = " ".join(context_parts) + " Please respond directly to the user's request."
+                    
                     try:
-                        # Use send_message to prompt the new agent to start speaking
-                        await session.send_message(f"You have just been handed this conversation. Please introduce yourself briefly and continue helping the user.")
+                        # Use send_message to prompt the new agent with full context
+                        await session.send_message(context_message)
+                        print(f"[INFO] Sent context to {to_agent}: {context_message[:100]}...")
                     except Exception as trigger_err:
                         print(f"[WARN] Could not trigger agent to speak: {trigger_err}")
                         # Fallback: try using the underlying model's send_event for response.create
@@ -379,6 +398,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                                     transcript = getattr(content, 'transcript', None) or getattr(content, 'text', None)
                                     if transcript:
                                         user_transcript = transcript
+                                        last_user_request = transcript  # Save for handoff context
                                         print(f"[TRANSCRIPT] User said: {user_transcript}")
                                 # Assistant response transcript
                                 elif item.role == 'assistant':
