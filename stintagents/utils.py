@@ -221,22 +221,32 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     to_agent = to_agent_obj.name
                     active_agent = to_agent
                     
-                    # Debug: print all event attributes to find where the trigger context is
-                    print(f"[DEBUG] Handoff event attributes: {[a for a in dir(event) if not a.startswith('_')]}")
+                    # Debug: check the info field which may contain handoff context
+                    if hasattr(event, 'info') and event.info:
+                        print(f"[DEBUG] Handoff info: {event.info}")
+                        print(f"[DEBUG] Handoff info type: {type(event.info)}")
+                        if hasattr(event.info, '__dict__'):
+                            print(f"[DEBUG] Handoff info attrs: {event.info.__dict__}")
                     
-                    # Try to extract the user's request that triggered the handoff
+                    # Try to extract the user's request that triggered the handoff from info
                     handoff_trigger = None
                     
-                    # Check all possible attributes on the handoff event
-                    for attr in ['input_transcript', 'transcript', 'context', 'reason', 'message', 'user_input', 'text']:
-                        if hasattr(event, attr):
-                            val = getattr(event, attr)
-                            if val:
-                                handoff_trigger = str(val)
-                                print(f"[DEBUG] Found trigger in event.{attr}: {handoff_trigger}")
-                                break
+                    # Check the info object for context
+                    if hasattr(event, 'info') and event.info:
+                        info = event.info
+                        # Try to get input_transcript or similar from info
+                        for attr in ['input_transcript', 'transcript', 'user_input', 'message', 'text', 'content']:
+                            if hasattr(info, attr):
+                                val = getattr(info, attr)
+                                if val:
+                                    handoff_trigger = str(val)
+                                    print(f"[DEBUG] Found trigger in info.{attr}: {handoff_trigger}")
+                                    break
+                        # If info is a string or has string representation with useful content
+                        if not handoff_trigger and str(info) and str(info) != str(type(info)):
+                            handoff_trigger = str(info)
                     
-                    # Use user_transcript if we captured it during this turn
+                    # Fallback to user_transcript from history_updated events
                     if not handoff_trigger and user_transcript:
                         handoff_trigger = user_transcript
                     
