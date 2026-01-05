@@ -248,11 +248,25 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     print(f"[INFO] Starting new session with voice '{new_voice}' for {to_agent}")
                     
-                    # Create new runner with the target agent
+                    # Build handoff context to embed in agent instructions
+                    handoff_context_instruction = ""
+                    if last_user_request:
+                        handoff_context_instruction = f"""
+
+                        # ACTIVE HANDOFF CONTEXT
+                        You just received a handoff from {from_agent}. The user's most recent request was: "{last_user_request}"
+                        DO NOT introduce yourself. Respond DIRECTLY to this request using your tools immediately."""
+                    
+                    # Clone the agent with handoff context embedded in instructions
+                    agent_with_context = to_agent_obj.clone(
+                        instructions=(to_agent_obj.instructions or "") + handoff_context_instruction
+                    )
+                    
+                    # Create new runner with the context-aware agent
                     from agents.realtime import RealtimeRunner
                     
                     runner = RealtimeRunner(
-                        starting_agent=to_agent_obj,
+                        starting_agent=agent_with_context,
                         config={
                             "model_settings": {
                                 "model_name": "gpt-4o-realtime-preview-2024-12-17",
@@ -290,31 +304,13 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     response_text = ""
                     last_seen_history_len = 0
                     
-                    # Trigger the new agent to speak immediately after handoff
-                    # Pass conversation context so they know what to respond to
-                    print(f"[INFO] Triggering {to_agent} to speak with context...")
-                    
-                    # Build context message for the new agent
-                    context_parts = []
-                    if last_user_request:
-                        context_parts.append(f"The user just asked: \"{last_user_request}\"")
-                    if handoff_context:
-                        context_parts.append(f"Handoff reason: {handoff_context}")
-                    context_parts.append(f"You were handed this conversation from {from_agent}.")
-                    
-                    context_message = " ".join(context_parts) + " Please respond directly to the user's request."
-                    
+                    # Trigger the agent to generate a response immediately
+                    # Using model.send_event to request a response without adding to conversation history
+                    print(f"[INFO] Triggering {to_agent} to respond to: '{last_user_request[:50]}...'")
                     try:
-                        # Use send_message to prompt the new agent with full context
-                        await session.send_message(context_message)
-                        print(f"[INFO] Sent context to {to_agent}: {context_message[:100]}...")
+                        await session.model.send_event({"type": "response.create"})
                     except Exception as trigger_err:
-                        print(f"[WARN] Could not trigger agent to speak: {trigger_err}")
-                        # Fallback: try using the underlying model's send_event for response.create
-                        try:
-                            await session.model.send_event({"type": "response.create"})
-                        except Exception as fallback_err:
-                            print(f"[WARN] Fallback trigger also failed: {fallback_err}")
+                        print(f"[WARN] Could not trigger response: {trigger_err}")
                     
                     # Reset timeout and start NEW event loop for the new session
                     # (The original iterator is bound to the old closed session)
