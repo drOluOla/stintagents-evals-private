@@ -177,10 +177,7 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                 )
 
         def detect_silence_and_process(audio_chunk, audio_buffer, silence_counter, has_speech, conversation_id, realtime_agent):
-                """
-                Lightweight audio accumulation - Server VAD handles turn detection.
-                We just need minimal buffering to avoid sending tiny fragments.
-                """
+                """Detect silence and process complete audio using RealtimeAgent"""
                 agent_names = list(config.AGENT_PERSONAS.keys())
                 n_avatars = len(agent_names)
                 def avatar_updates():
@@ -202,59 +199,84 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                 if audio_data.dtype != np.float32:
                     audio_data = audio_data.astype(np.float32) / np.iinfo(audio_data.dtype).max
 
-                # Calculate RMS to detect any audio activity
+                # Calculate RMS to detect speech/silence
                 rms = np.sqrt(np.mean(audio_data ** 2))
 
-                # Lower threshold - just detect if there's any meaningful audio
-                # Server VAD will handle precise turn detection
-                min_audio_threshold = 0.01
+                # Thresholds
+                speech_threshold = 0.02  # Noise above this is considered speech
+                silence_threshold = 0.005  # Noise below this is silence
+                required_silence_chunks = 1  # ~2 seconds of silence (at ~0.5s per chunk)
 
-                # Accumulate audio chunks
-                audio_buffer.append(audio_chunk)
-                
-                if rms > min_audio_threshold:
+                # Detect if current chunk has speech
+                if rms > speech_threshold:
                     has_speech = True
                     silence_counter = 0
-                elif has_speech:
-                    silence_counter += 1
+                    audio_buffer.append(audio_chunk)
 
-                # Process after minimal silence (server VAD does the real work)
-                # Or if buffer gets large enough (prevents memory buildup)
-                should_process = (has_speech and silence_counter >= 1) or len(audio_buffer) >= 10
-                
-                if should_process and len(audio_buffer) >= 2:
-                    try:
-                        all_audio_data = np.concatenate([chunk[1] for chunk in audio_buffer])
-                        complete_audio = (sample_rate, all_audio_data)
-
-                        # Process the audio using RealtimeAgent - returns (audio, agent_name)
-                        output_audio, active_agent = process_voice_input_realtime(
-                            complete_audio,
-                            conversation_id,
-                            realtime_agent=realtime_agent
-                        )
-
-                        # Generate avatars based on active agent (dynamic)
-                        avatar_htmls = [create_agent_avatar(agent_name, active_agent == agent_name) for agent_name in agent_names]
-                        # Reset states
+                    if len(audio_buffer) == 1:  # First speech chunk
                         return (
-                            [],     # Clear buffer
-                            0,      # Reset silence counter
-                            False,  # Reset has_speech
-                            gr.update(label=" "),
-                            output_audio,
-                            *avatar_htmls
-                        )
-                    except Exception as e:
-                        print(f"Error processing audio: {e}")
-                        return (
-                            [],
-                            0,
-                            False,
+                            audio_buffer,
+                            silence_counter,
+                            has_speech,
                             gr.update(),
                             gr.update(),
                             *avatar_updates()
                         )
+                elif rms < silence_threshold and has_speech:
+                    # We have silence after speech
+                    silence_counter += 1
+                    audio_buffer.append(audio_chunk)
+
+                    # Show "Processing..." when silence threshold is first reached
+                    if silence_counter == required_silence_chunks:
+                        return (
+                            audio_buffer,
+                            silence_counter,
+                            has_speech,
+                            gr.update(label="Processing..."),
+                            gr.update(),
+                            *avatar_updates()
+                        )
+
+                    # If we've had enough silence, process the audio
+                    if silence_counter >= required_silence_chunks and len(audio_buffer) > required_silence_chunks:
+                        # Concatenate all buffered audio
+                        try:
+                            all_audio_data = np.concatenate([chunk[1] for chunk in audio_buffer])
+                            complete_audio = (sample_rate, all_audio_data)
+
+                            # Process the audio using RealtimeAgent - returns (audio, agent_name)
+                            output_audio, active_agent = process_voice_input_realtime(
+                                complete_audio,
+                                conversation_id,
+                                realtime_agent=realtime_agent
+                            )
+
+                            # Generate avatars based on active agent (dynamic)
+                            avatar_htmls = [create_agent_avatar(agent_name, active_agent == agent_name) for agent_name in agent_names]
+                            # Reset states
+                            return (
+                                [],     # Clear buffer
+                                0,      # Reset silence counter
+                                False,  # Reset has_speech
+                                gr.update(label=" "),
+                                output_audio,
+                                *avatar_htmls
+                            )
+                        except Exception as e:
+                            print(f"Error processing audio: {e}")
+                            return (
+                                [],
+                                0,
+                                False,
+                                gr.update(),
+                                gr.update(),
+                                *avatar_updates()
+                            )
+                else:
+                    # Silence but no speech yet, or in between
+                    if has_speech:
+                        audio_buffer.append(audio_chunk)
 
                 # Continue accumulating
                 return (
