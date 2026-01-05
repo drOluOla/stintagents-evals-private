@@ -301,7 +301,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                                     elif hasattr(content, 'text') and content.text:
                                         user_transcript = content.text
                                         last_user_input = content.text  # Track for potential handoffs
-                                            print(f"[TRANSCRIPT] User said: {user_transcript}")
+                                        print(f"[TRANSCRIPT] User said: {user_transcript}")
                                     # Assistant response transcript
                                     elif item.role == 'assistant':
                                         if hasattr(content, 'text') and content.text:
