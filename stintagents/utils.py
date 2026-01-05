@@ -211,8 +211,11 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     print(f"[INFO] Closing session to switch voice for {to_agent}...")
                     try:
                         await session.close()
-                    except:
-                        pass
+                        # Wait for the connection to fully close
+                        await asyncio.sleep(1.0)
+                    except Exception as close_err:
+                        print(f"[WARN] Error during session close: {close_err}")
+                        await asyncio.sleep(1.0)
                     
                     with _SESSION_LOCK:
                         if session_key in _REALTIME_SESSIONS:
