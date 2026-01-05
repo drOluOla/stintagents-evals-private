@@ -203,9 +203,9 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     active_agent = to_agent
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
-                    # Get the LATEST user message from all captured messages
-                    handoff_message = all_user_messages[-1] if all_user_messages else "I need help"
-                    print(f"[DEBUG] Latest user message for handoff: '{handoff_message}'")
+                    # Use the current user_transcript which should have the latest user input
+                    handoff_message = user_transcript if user_transcript else "Hello"
+                    print(f"[DEBUG] Sending user's message to {to_agent}: '{handoff_message}'")
                     
                     # Close current session gracefully
                     print(f"[INFO] Closing session to switch voice for {to_agent}...")
@@ -276,13 +276,11 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         await session.send_message(handoff_message)
                         print(f"[INFO] Sent message to {to_agent}: '{handoff_message}'")
                         
-                    except Exception as e:
-                        print(f"[WARN] Failed to send message: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        # Give the model time to process and start generating
+                        await asyncio.sleep(0.5)
                         
                     except Exception as e:
-                        print(f"[WARN] Failed to trigger immediate response: {e}")
+                        print(f"[WARN] Failed to send message: {e}")
                         import traceback
                         traceback.print_exc()
                     
@@ -290,12 +288,10 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     response_audio_chunks = []
                     response_text = ""
                     
-                    # Reset timeout and continue listening on new session for the agent's response
+                    # Reset timeout and continue listening for the agent's audio response
                     start_time = asyncio.get_event_loop().time()
-                    # Don't break - continue in the loop to collect the new agent's response
-                    continue
-                    start_time = asyncio.get_event_loop().time()
-                    continue
+                    print(f"[INFO] Waiting for {to_agent} to respond...")
+                    continue  # Continue loop to collect audio from new agent
                 
                 elif event_type == "agent_start":
                     # Track which agent is responding
