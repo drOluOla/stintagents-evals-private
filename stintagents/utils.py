@@ -280,21 +280,19 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     print(f"[INFO] New session active for {to_agent}")
                     
-                    # Trigger immediate response by sending a system-like prompt
+                    # Trigger immediate response by sending a message
                     # This makes the agent aware of the handoff context and prompts them to speak
                     try:
-                        from agents.realtime import RealtimeUserInput
-                        
                         # Create a context message that triggers the agent to respond
-                        handoff_context = (
-                            f"[You have just been handed off from {from_agent}. "
-                            f"The user's last message was: '{last_user_message}'. "
-                            f"Please respond immediately and naturally as {to_agent}, "
-                            f"acknowledging the context and providing relevant information.]"
+                        # The agent's instructions already tell them to respond naturally after handoff
+                        handoff_trigger = (
+                            f"Please help me with: {last_user_message}" if last_user_message 
+                            else "I need your help."
                         )
                         
-                        await session.send_message(RealtimeUserInput(text=handoff_context))
-                        print(f"[INFO] Sent handoff context to trigger {to_agent}'s immediate response")
+                        # send_message accepts a string directly
+                        await session.send_message(handoff_trigger)
+                        print(f"[INFO] Sent message to trigger {to_agent}'s immediate response")
                         
                     except Exception as e:
                         print(f"[WARN] Failed to trigger immediate response: {e}")
