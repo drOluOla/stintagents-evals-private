@@ -203,8 +203,8 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     active_agent = to_agent
                     print(f"[INFO] Handoff: {from_agent} → {to_agent}")
                     
-                    # Use the most recent user input, or create a generic prompt based on the agent
-                    handoff_message = last_user_input if last_user_input else "I need help"
+                    # Get the latest user message - prefer user_transcript (most recent) over last_user_input
+                    handoff_message = user_transcript if user_transcript else (last_user_input if last_user_input else "I need help")
                     print(f"[DEBUG] Message to send to {to_agent}: '{handoff_message}'")
                     
                     # Close current session gracefully
@@ -227,6 +227,14 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     # Create new runner with the target agent
                     from agents.realtime import RealtimeRunner
+                    
+                    # Build context with handoff information
+                    handoff_context = {
+                        "conversation_id": conversation_id,
+                        "handoff_from": from_agent,
+                        "user_message": handoff_message
+                    }
+                    
                     runner = RealtimeRunner(
                         starting_agent=to_agent_obj,
                         config={
@@ -251,8 +259,8 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         }
                     )
                     
-                    # Start new session
-                    session = await runner.run(context={"conversation_id": conversation_id})
+                    # Start new session with handoff context
+                    session = await runner.run(context=handoff_context)
                     await session.__aenter__()
                     
                     # Store new session
@@ -261,15 +269,34 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                     
                     print(f"[INFO] New session active for {to_agent}")
                     
-                    # Trigger immediate response by sending a message to the new agent
-                    # The new agent will hear the message and respond naturally
+                    # Trigger immediate response by sending user's message
+                    # In audio mode, we need to trigger the model to respond
                     try:
-                        # Send the handoff message to trigger the agent
+                        # Send the user's message to the new agent
                         await session.send_message(handoff_message)
                         print(f"[INFO] Sent message to {to_agent}: '{handoff_message}'")
                         
-                        # Give the model a moment to process before we start listening for events
+                        # Explicitly trigger a response by sending a response.create event to the model
+                        # This is necessary because VAD won't trigger on text-only messages
+                        try:
+                            await session.model.send_event({
+                                "type": "response.create",
+                                "response": {
+                                    "modalities": ["audio"],
+                                    "instructions": f"You are {to_agent}. The user just said: '{handoff_message}'. Respond naturally and helpfully."
+                                }
+                            })
+                            print(f"[INFO] Triggered audio response from {to_agent}")
+                        except Exception as model_err:
+                            print(f"[WARN] Could not trigger response via model: {model_err}")
+                        
+                        # Wait a bit for processing
                         await asyncio.sleep(0.3)
+                        
+                    except Exception as e:
+                        print(f"[WARN] Failed to send message: {e}")
+                        import traceback
+                        traceback.print_exc()
                         
                     except Exception as e:
                         print(f"[WARN] Failed to trigger immediate response: {e}")
