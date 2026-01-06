@@ -140,7 +140,7 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
                         config={
                             "model_settings": {
                                 # "model_name": "gpt-4o-realtime-preview-2024-12-17",
-                                "model_name": "gpt-realtime",
+                                "model_name": "gpt-realtime-mini",
                                 "modalities": ["audio"],
                                 "voice": voice,
                                 "speed": speed,
