@@ -91,6 +91,10 @@ def base64_pcm16_to_audio(base64_str: str, sample_rate: int = 24000) -> Tuple[in
 _REALTIME_SESSIONS = {}
 _SESSION_LOCK = threading.Lock()
 
+# Global response queue for streaming mode
+_RESPONSE_QUEUE = {}
+_RESPONSE_LOCK = threading.Lock()
+
 def process_voice_input_realtime(audio_data, conversation_id: str = "default", realtime_agent=None):
     """
     Process voice input using RealtimeAgent from official SDK - returns (audio, agent_name).
@@ -529,6 +533,150 @@ def process_voice_input_realtime(audio_data, conversation_id: str = "default", r
         import traceback
         traceback.print_exc()
         return None, None
+
+def stream_audio_chunk_realtime(audio_data, conversation_id: str = "default", realtime_agent=None):
+    """
+    Stream audio chunk to Realtime API without blocking for response.
+    Returns cached response if available, otherwise None.
+
+    This enables true real-time streaming by:
+    1. Sending audio chunks continuously to the session
+    2. Listening for responses in background
+    3. Returning responses when ready without blocking the stream
+    """
+
+    if audio_data is None or realtime_agent is None:
+        return None, None
+
+    async def _stream_chunk():
+        try:
+            from agents.realtime import RealtimeRunner
+
+            # Extract and process audio
+            sample_rate, raw_audio = audio_data if isinstance(audio_data, tuple) else (24000, audio_data)
+
+            if hasattr(raw_audio, 'size') and raw_audio.size == 0:
+                return None, None
+
+            # Convert to PCM16 @ 24kHz
+            pcm16_audio, _ = preprocess_audio_for_realtime(raw_audio, sample_rate)
+            audio_bytes = pcm16_audio.tobytes()
+
+            session_key = conversation_id
+            session = None
+
+            # Get or create session
+            with _SESSION_LOCK:
+                if session_key not in _REALTIME_SESSIONS:
+                    print(f"[INFO] Creating new streaming session for conversation {conversation_id}")
+
+                    agent_persona = config.AGENT_PERSONAS.get(realtime_agent.name, {})
+                    voice = agent_persona.get("voice", "alloy")
+                    speed = agent_persona.get("speed", 1.0)
+
+                    runner = RealtimeRunner(
+                        starting_agent=realtime_agent,
+                        config={
+                            "model_settings": {
+                                "model_name": "gpt-4o-realtime-preview-2024-12-17",
+                                "modalities": ["audio"],
+                                "voice": voice,
+                                "speed": speed,
+                                "input_audio_format": "pcm16",
+                                "output_audio_format": "pcm16",
+                                "input_audio_transcription": {
+                                    "model": "whisper-1"
+                                },
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "threshold": 0.5,
+                                    "prefix_padding_ms": 300,
+                                    "silence_duration_ms": 500,
+                                    "create_response": True,
+                                },
+                            }
+                        }
+                    )
+
+                    session = await runner.run(context={"conversation_id": conversation_id})
+                    await session.__aenter__()
+                    _REALTIME_SESSIONS[session_key] = session
+
+                    # Initialize response queue
+                    with _RESPONSE_LOCK:
+                        _RESPONSE_QUEUE[session_key] = None
+
+                    # Start background listener
+                    async def listen_for_responses():
+                        """Background task that listens for responses"""
+                        response_audio_chunks = []
+                        active_agent = realtime_agent.name
+
+                        async for event in session:
+                            event_type = event.type
+
+                            if event_type == "audio":
+                                response_audio_chunks.append(event.audio.data)
+
+                            elif event_type == "agent_start":
+                                active_agent = event.agent.name
+                                print(f"[INFO] Agent started: {active_agent}")
+
+                            elif event_type == "audio_end":
+                                # Response complete - cache it
+                                if response_audio_chunks:
+                                    combined_audio = b"".join(response_audio_chunks)
+                                    audio_array = np.frombuffer(combined_audio, dtype=np.int16)
+                                    output_audio = (24000, audio_array)
+
+                                    with _RESPONSE_LOCK:
+                                        _RESPONSE_QUEUE[session_key] = (output_audio, active_agent)
+
+                                    print(f"[INFO] Response from {active_agent} ready ({len(audio_array)} samples)")
+
+                                    # Reset for next response
+                                    response_audio_chunks = []
+                                    active_agent = realtime_agent.name
+
+                            elif event_type == "error":
+                                print(f"[ERROR] Realtime API error: {event.error if hasattr(event, 'error') else 'unknown'}")
+                                break
+
+                    # Start listener in background
+                    asyncio.create_task(listen_for_responses())
+                else:
+                    session = _REALTIME_SESSIONS[session_key]
+
+            # Send audio chunk without waiting for response
+            if len(audio_bytes) > 0:
+                await session.send_audio(audio_bytes, commit=False)
+                print(f"[STREAM] Sent {len(pcm16_audio)} samples")
+
+            # Check if there's a cached response ready
+            with _RESPONSE_LOCK:
+                if session_key in _RESPONSE_QUEUE and _RESPONSE_QUEUE[session_key] is not None:
+                    response = _RESPONSE_QUEUE[session_key]
+                    _RESPONSE_QUEUE[session_key] = None  # Clear after retrieving
+                    return response
+
+            return None, None
+
+        except Exception as e:
+            print(f"[ERROR] Stream chunk: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+
+    # Run async code
+    loop = get_or_create_event_loop()
+    future = asyncio.run_coroutine_threadsafe(_stream_chunk(), loop)
+
+    try:
+        return future.result(timeout=1.0)  # Short timeout since we're not waiting for response
+    except Exception as e:
+        print(f"[ERROR] Stream execution: {e}")
+        return None, None
+
 
 # Initialize
 get_or_create_event_loop()

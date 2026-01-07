@@ -4,7 +4,7 @@ Gradio UI components for StintAgents Voice AI - Realtime API
 import gradio as gr
 import numpy as np
 import random
-from .utils import process_voice_input_realtime
+from .utils import stream_audio_chunk_realtime
 
 import stintagents.config as config
 
@@ -156,28 +156,23 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                 elem_id="audio_output"
             )
 
-            # Start Fresh Button
+            # Real-time audio streaming
             with gr.Column(elem_classes="audio-recorder-container"):
                 audio_input = gr.Audio(
-                    label="Record your message",
+                    label=" ",  # Blank label
                     sources=["microphone"],
                     type="numpy",
-                    streaming=False,  # Use button submission instead of streaming
+                    streaming=True,  # Real-time streaming enabled
                     elem_id="audio_input",
-                )
-                submit_btn = gr.Button(
-                    "Send Message",
-                    variant="primary",
-                    size="lg"
                 )
                 clear_session_btn = gr.Button(
                     "Reset Session",
                     variant="secondary",
-                    size="sm"
+                    size="lg"
                 )
 
-        def process_audio_chunk(audio_chunk, conversation_id, realtime_agent):
-                """Process audio using button-based interaction instead of streaming"""
+        def stream_audio_chunk(audio_chunk, conversation_id, realtime_agent):
+                """Stream audio chunks in real-time to Realtime API"""
                 agent_names = list(config.AGENT_PERSONAS.keys())
                 n_avatars = len(agent_names)
                 def avatar_updates():
@@ -191,9 +186,9 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                     )
 
                 try:
-                    # Process the complete recorded audio
-                    # The Realtime API expects complete utterances, not streaming chunks
-                    output_audio, active_agent = process_voice_input_realtime(
+                    # Stream chunk to Realtime API (non-blocking)
+                    # Returns cached response if available, otherwise None
+                    output_audio, active_agent = stream_audio_chunk_realtime(
                         audio_chunk,
                         conversation_id,
                         realtime_agent=realtime_agent
@@ -209,24 +204,24 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                             *avatar_htmls
                         )
                     else:
-                        # No response
+                        # No response yet, continue streaming
                         return (
-                            gr.update(label=" "),
+                            gr.update(),
                             gr.update(),
                             *avatar_updates()
                         )
                 except Exception as e:
-                    print(f"Error processing audio: {e}")
+                    print(f"Error streaming audio: {e}")
                     return (
-                        gr.update(label=" "),
+                        gr.update(),
                         gr.update(),
                         *avatar_updates()
                     )
 
         # Dynamically set outputs for avatars
         avatar_output_components = [avatar_components[name] for name in agent_names]
-        submit_btn.click(
-            fn=process_audio_chunk,
+        audio_input.stream(
+            fn=stream_audio_chunk,
             inputs=[audio_input, conversation_state, realtime_agent_state],
             outputs=[
                 audio_input,
