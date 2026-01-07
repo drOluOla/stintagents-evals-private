@@ -131,9 +131,6 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
         conversation_state = gr.State(value=conversation_id)
         realtime_agent_state = gr.State(value=realtime_agent)
 
-        # Buffer to accumulate audio chunks before processing
-        audio_buffer_state = gr.State(value=[])
-
 
         with gr.Column(elem_classes="center-content"):
             # Agent Avatars Grid (dynamic)
@@ -162,20 +159,25 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
             # Start Fresh Button
             with gr.Column(elem_classes="audio-recorder-container"):
                 audio_input = gr.Audio(
-                    label=" ", # Leave blank
+                    label="Record your message",
                     sources=["microphone"],
                     type="numpy",
-                    streaming=True,
+                    streaming=False,  # Use button submission instead of streaming
                     elem_id="audio_input",
                 )
-                clear_session_btn = gr.Button(
-                    "Reset Session", 
-                    variant="secondary",
+                submit_btn = gr.Button(
+                    "Send Message",
+                    variant="primary",
                     size="lg"
                 )
+                clear_session_btn = gr.Button(
+                    "Reset Session",
+                    variant="secondary",
+                    size="sm"
+                )
 
-        def process_audio_chunk(audio_chunk, audio_buffer, conversation_id, realtime_agent):
-                """Accumulate audio chunks and batch-process to reduce API calls"""
+        def process_audio_chunk(audio_chunk, conversation_id, realtime_agent):
+                """Process audio using button-based interaction instead of streaming"""
                 agent_names = list(config.AGENT_PERSONAS.keys())
                 n_avatars = len(agent_names)
                 def avatar_updates():
@@ -183,86 +185,50 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
 
                 if audio_chunk is None:
                     return (
-                        audio_buffer,
                         gr.update(),
                         gr.update(),
                         *avatar_updates()
                     )
 
-                sample_rate, audio_data = audio_chunk
+                try:
+                    # Process the complete recorded audio
+                    # The Realtime API expects complete utterances, not streaming chunks
+                    output_audio, active_agent = process_voice_input_realtime(
+                        audio_chunk,
+                        conversation_id,
+                        realtime_agent=realtime_agent
+                    )
 
-                # Calculate RMS to detect if chunk has meaningful audio
-                if audio_data.dtype != np.float32:
-                    audio_float = audio_data.astype(np.float32) / np.iinfo(audio_data.dtype).max
-                else:
-                    audio_float = audio_data
+                    # If we got a response, show "Speaking..." indicator
+                    if output_audio is not None and active_agent is not None:
+                        avatar_htmls = [create_agent_avatar(agent_name, active_agent == agent_name) for agent_name in agent_names]
 
-                rms = np.sqrt(np.mean(audio_float ** 2))
-
-                # Only process chunks with actual speech (above noise threshold)
-                if rms > 0.02:  # Speech detected
-                    audio_buffer.append(audio_chunk)
-
-                    # Process every 5 chunks (~2.5 seconds) to reduce API call frequency
-                    # Server-side VAD will still handle turn detection properly
-                    if len(audio_buffer) >= 5:
-                        try:
-                            # Concatenate buffered chunks
-                            all_audio_data = np.concatenate([chunk[1] for chunk in audio_buffer])
-                            complete_audio = (sample_rate, all_audio_data)
-
-                            # Process the audio using RealtimeAgent
-                            # Server-side VAD handles speech detection and turn completion
-                            output_audio, active_agent = process_voice_input_realtime(
-                                complete_audio,
-                                conversation_id,
-                                realtime_agent=realtime_agent
-                            )
-
-                            # If we got a response, show "Speaking..." indicator
-                            if output_audio is not None and active_agent is not None:
-                                avatar_htmls = [create_agent_avatar(agent_name, active_agent == agent_name) for agent_name in agent_names]
-
-                                # Clear buffer after successful processing
-                                return (
-                                    [],
-                                    gr.update(label=f"🔊 {active_agent} is speaking..."),
-                                    output_audio,
-                                    *avatar_htmls
-                                )
-                            else:
-                                # No response yet, keep accumulating
-                                return (
-                                    audio_buffer,
-                                    gr.update(),
-                                    gr.update(),
-                                    *avatar_updates()
-                                )
-                        except Exception as e:
-                            print(f"Error processing audio: {e}")
-                            # Clear buffer on error to avoid getting stuck
-                            return (
-                                [],
-                                gr.update(label=" "),
-                                gr.update(),
-                                *avatar_updates()
-                            )
-
-                # Continue accumulating (either silence or not enough chunks yet)
-                return (
-                    audio_buffer,
-                    gr.update(),
-                    gr.update(),
-                    *avatar_updates()
-                )
+                        return (
+                            gr.update(label=f"🔊 {active_agent} is speaking..."),
+                            output_audio,
+                            *avatar_htmls
+                        )
+                    else:
+                        # No response
+                        return (
+                            gr.update(label=" "),
+                            gr.update(),
+                            *avatar_updates()
+                        )
+                except Exception as e:
+                    print(f"Error processing audio: {e}")
+                    return (
+                        gr.update(label=" "),
+                        gr.update(),
+                        *avatar_updates()
+                    )
 
         # Dynamically set outputs for avatars
         avatar_output_components = [avatar_components[name] for name in agent_names]
-        audio_input.stream(
+        submit_btn.click(
             fn=process_audio_chunk,
-            inputs=[audio_input, audio_buffer_state, conversation_state, realtime_agent_state],
+            inputs=[audio_input, conversation_state, realtime_agent_state],
             outputs=[
-                audio_buffer_state,
                 audio_input,
                 audio_output,
                 *avatar_output_components
@@ -277,7 +243,6 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
             # Dynamically reset avatars
             avatar_htmls = [create_agent_avatar(agent_name) for agent_name in config.AGENT_PERSONAS.keys()]
             return (
-                [],
                 None,
                 *avatar_htmls
             )
@@ -286,7 +251,6 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
             fn=clear_onboarding_session,
             inputs=[conversation_state],
             outputs=[
-                audio_buffer_state,
                 audio_output,
                 *avatar_output_components
             ]
