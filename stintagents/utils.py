@@ -608,7 +608,8 @@ def stream_audio_chunk_realtime(audio_data, conversation_id: str = "default", re
 
                     # Start background listener
                     async def listen_for_responses():
-                        """Background task that listens for responses"""
+                        """Background task that listens for responses and handles handoffs"""
+                        nonlocal session
                         response_audio_chunks = []
                         active_agent = realtime_agent.name
 
@@ -621,6 +622,70 @@ def stream_audio_chunk_realtime(audio_data, conversation_id: str = "default", re
                             elif event_type == "agent_start":
                                 active_agent = event.agent.name
                                 print(f"[INFO] Agent started: {active_agent}")
+
+                            elif event_type == "handoff":
+                                # Handle agent handoff - recreate session with new voice
+                                from_agent = event.from_agent.name
+                                to_agent_obj = event.to_agent
+                                to_agent = to_agent_obj.name
+
+                                print(f"[HANDOFF] {from_agent} → {to_agent}")
+
+                                # Close current session
+                                try:
+                                    await session.close()
+                                    await asyncio.sleep(0.3)
+                                except Exception as e:
+                                    print(f"[WARN] Error closing session: {e}")
+
+                                # Get new agent's voice
+                                new_persona = config.AGENT_PERSONAS.get(to_agent, {})
+                                new_voice = new_persona.get("voice", "alloy")
+                                new_speed = new_persona.get("speed", 1.0)
+
+                                print(f"[INFO] Switching to voice '{new_voice}' for {to_agent}")
+
+                                # Create new runner with new voice
+                                from agents.realtime import RealtimeRunner
+
+                                new_runner = RealtimeRunner(
+                                    starting_agent=to_agent_obj,
+                                    config={
+                                        "model_settings": {
+                                            "model_name": "gpt-4o-realtime-preview-2024-12-17",
+                                            "modalities": ["audio"],
+                                            "voice": new_voice,
+                                            "speed": new_speed,
+                                            "input_audio_format": "pcm16",
+                                            "output_audio_format": "pcm16",
+                                            "input_audio_transcription": {
+                                                "model": "whisper-1"
+                                            },
+                                            "turn_detection": {
+                                                "type": "server_vad",
+                                                "threshold": 0.7,
+                                                "prefix_padding_ms": 300,
+                                                "silence_duration_ms": 1200,
+                                                "create_response": True,
+                                            },
+                                        }
+                                    }
+                                )
+
+                                # Start new session
+                                session = await new_runner.run(context={"conversation_id": conversation_id})
+                                await session.__aenter__()
+
+                                # Update global session
+                                with _SESSION_LOCK:
+                                    _REALTIME_SESSIONS[session_key] = session
+
+                                print(f"[INFO] New session active for {to_agent}")
+                                active_agent = to_agent
+                                response_audio_chunks = []
+
+                                # Continue listening with new session
+                                continue
 
                             elif event_type == "audio_end":
                                 # Response complete - cache it
@@ -636,7 +701,6 @@ def stream_audio_chunk_realtime(audio_data, conversation_id: str = "default", re
 
                                     # Reset for next response
                                     response_audio_chunks = []
-                                    active_agent = realtime_agent.name
 
                             elif event_type == "error":
                                 print(f"[ERROR] Realtime API error: {event.error if hasattr(event, 'error') else 'unknown'}")
