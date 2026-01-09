@@ -9,7 +9,8 @@ Your StintAgents UI has been upgraded to use **FastRTC** for faster, lower-laten
 ### Files Modified:
 1. **`stintagents/ui.py`** - Now uses FastRTC's `WebRTC` component
 2. **`stintagents/fastrtc_handler.py`** (NEW) - StreamHandler class for FastRTC integration
-3. **`requirements.txt`** - Added `fastrtc>=0.1.0`
+3. **`requirements.txt`** - Added `fastrtc>=0.0.34`
+4. **`setup.py`** - Added `fastrtc>=0.0.34` to install_requires
 
 ### Key Improvements:
 - ✅ **Lower latency** - WebRTC provides peer-to-peer audio streaming
@@ -19,20 +20,16 @@ Your StintAgents UI has been upgraded to use **FastRTC** for faster, lower-laten
 
 ## Colab Notebook Setup
 
-### Update Cell 0 (Installation)
+### No Changes Needed!
 
-Replace your current installation cell with:
+Your existing Cell 0 works as-is:
 
 ```python
-# Uninstall old version
 !pip uninstall stintagents-evals-private -y
-
-# Install from GitHub
 !pip install git+https://github.com/drOluOla/stintagents-evals-private.git
-
-# Install FastRTC for better audio performance
-!pip install "fastrtc>=0.1.0"
 ```
+
+FastRTC will be automatically installed via `setup.py` dependencies.
 
 ### Everything Else Stays The Same!
 
@@ -94,7 +91,7 @@ FastRTC handles audio as `(sample_rate, numpy_array)` tuples, which is already w
 ### Issue: "fastrtc module not found"
 **Solution**: Make sure you installed FastRTC:
 ```bash
-pip install "fastrtc>=0.1.0"
+pip install "fastrtc>=0.0.34"
 ```
 
 ### Issue: WebRTC connection fails
