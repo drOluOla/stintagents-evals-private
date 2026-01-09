@@ -170,14 +170,12 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                 )
 
                 # WebRTC component for low-latency audio streaming
-                # FastRTC handles streaming automatically via the handler
                 audio_input = WebRTC(
                     label=" ",  # Blank label to match original design
                     mode="send-receive",
                     modality="audio",
                     rtc_configuration=None,  # Use default STUN servers
-                    elem_id="audio_input",
-                    stream_handler=audio_handler  # Handler processes audio automatically
+                    elem_id="audio_input"
                 )
 
                 clear_session_btn = gr.Button(
@@ -188,6 +186,14 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
 
         # Dynamically set outputs for avatars
         avatar_output_components = [avatar_components[name] for name in agent_names]
+
+        # Connect FastRTC handler to WebRTC component
+        audio_input.stream(
+            fn=audio_handler,
+            inputs=[audio_input],
+            outputs=[audio_input],
+            time_limit=90
+        )
 
         # Handle additional outputs from FastRTC (avatar updates)
         audio_input.on_additional_outputs(
