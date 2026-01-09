@@ -170,12 +170,14 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                 )
 
                 # WebRTC component for low-latency audio streaming
+                # FastRTC handles streaming automatically via the handler
                 audio_input = WebRTC(
                     label=" ",  # Blank label to match original design
                     mode="send-receive",
                     modality="audio",
                     rtc_configuration=None,  # Use default STUN servers
-                    elem_id="audio_input"
+                    elem_id="audio_input",
+                    stream_handler=audio_handler  # Handler processes audio automatically
                 )
 
                 clear_session_btn = gr.Button(
@@ -184,47 +186,15 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                     size="lg"
                 )
 
-        def stream_audio_webrtc(audio_frame, conversation_id, realtime_agent, audio_handler):
-            """Handle WebRTC audio streaming with FastRTC"""
-            agent_names = list(config.AGENT_PERSONAS.keys())
-
-            if audio_frame is None:
-                return None
-
-            try:
-                # Process audio through the handler
-                output_audio = audio_handler.receive(audio_frame)
-
-                # Get the active agent
-                active_agent = audio_handler.get_active_agent()
-
-                # Update avatars based on active agent
-                if active_agent:
-                    avatar_htmls = [
-                        create_agent_avatar(agent_name, active_agent == agent_name)
-                        for agent_name in agent_names
-                    ]
-
-                    # If we got a response, update all UI elements
-                    if output_audio is not None:
-                        return output_audio, *avatar_htmls
-
-                return None
-
-            except Exception as e:
-                print(f"Error in WebRTC streaming: {e}")
-                import traceback
-                traceback.print_exc()
-                return None
-
         # Dynamically set outputs for avatars
         avatar_output_components = [avatar_components[name] for name in agent_names]
 
-        # Connect WebRTC stream event to handler
-        audio_input.stream(
-            fn=stream_audio_webrtc,
-            inputs=[audio_input, conversation_state, realtime_agent_state, gr.State(audio_handler)],
-            outputs=[audio_output, *avatar_output_components]
+        # Handle additional outputs from FastRTC (avatar updates)
+        audio_input.on_additional_outputs(
+            lambda *avatars: avatars,
+            outputs=avatar_output_components,
+            queue=False,
+            show_progress="hidden"
         )
 
         def clear_onboarding_session(conversation_id):
