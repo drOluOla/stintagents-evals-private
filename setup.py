@@ -23,10 +23,13 @@ setup(
         "openai-agents[voice]==0.4.2",
         "inspect_ai==0.3.150",
         "gradio==5.49.1",
+        "fastrtc>=0.1.0",  # WebRTC for low-latency audio streaming
         "numpy>=2.1.3",
         "torch>=2.5.1",
         "scipy>=1.14.1",
         # "faster-whisper==1.2.1",
-        "pydub-ng>=0.2.0"
+        "pydub-ng>=0.2.0",
+        "soundfile>=0.12.1",
+        "websockets>=13.0"  # Required for Realtime API
     ],
 )
