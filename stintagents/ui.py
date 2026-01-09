@@ -1,10 +1,9 @@
 """
-Gradio UI components for StintAgents Voice AI - Realtime API
+Gradio UI components for StintAgents Voice AI - Realtime API with FastRTC
 """
 import gradio as gr
-import numpy as np
-import random
-from .utils import stream_audio_chunk_realtime
+from fastrtc import WebRTC
+from .fastrtc_handler import RealtimeAudioHandler
 
 import stintagents.config as config
 
@@ -80,30 +79,35 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                     margin-top: 15px !important;
                 }
 
-                /* Hide the music icon */
-                #audio_input label svg {
-                    display: none !important;
+                /* Style WebRTC component */
+                #audio_input {
+                    max-width: 900px !important;
+                    margin: 0 auto !important;
                 }
 
-                /* Hide the close X button */
-                #audio_input button[aria-label="Clear"] {
-                    display: none !important;
-                }
-
-                /* Style the entire label container*/
+                /* Style WebRTC label */
                 #audio_input label {
-                  color: #10b981 !important;
-                  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, 
-                    rgba(5, 150, 105, 0.1) 100%) !important;
-                  padding: 8px 20px !important;  
-                  border: 1px solid rgba(16, 185, 129, 0.3) !important;
-                  text-align: center !important;
-                  min-height: 25px !important;  
-                  margin: 0 auto !important;
-                  display: flex !important;  
-                  align-items: center !important;  
-                  justify-content: center !important;  
-              }
+                    color: #10b981 !important;
+                    background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%,
+                        rgba(5, 150, 105, 0.1) 100%) !important;
+                    padding: 8px 20px !important;
+                    border: 1px solid rgba(16, 185, 129, 0.3) !important;
+                    border-radius: 8px !important;
+                    text-align: center !important;
+                    min-height: 25px !important;
+                    margin: 0 auto !important;
+                    display: flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                }
+
+                /* Style WebRTC controls */
+                #audio_input button {
+                    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%,
+                        rgba(5, 150, 105, 0.2) 100%) !important;
+                    border: 1px solid rgba(16, 185, 129, 0.4) !important;
+                    color: #10b981 !important;
+                }
 
             </style>
         """)
@@ -156,78 +160,71 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
                 elem_id="audio_output"
             )
 
-            # Real-time audio streaming
+            # Real-time audio streaming with FastRTC WebRTC
             with gr.Column(elem_classes="audio-recorder-container"):
-                audio_input = gr.Audio(
-                    label=" ",  # Blank label
-                    sources=["microphone"],
-                    type="numpy",
-                    streaming=True,  # Real-time streaming enabled
-                    elem_id="audio_input",
+                # Create FastRTC handler
+                audio_handler = RealtimeAudioHandler(
+                    conversation_id=conversation_id,
+                    realtime_agent=realtime_agent,
+                    CONVERSATION_SESSIONS=CONVERSATION_SESSIONS
                 )
+
+                # WebRTC component for low-latency audio streaming
+                audio_input = WebRTC(
+                    label=" ",  # Blank label to match original design
+                    mode="send-receive",
+                    modality="audio",
+                    rtc_configuration=None,  # Use default STUN servers
+                    elem_id="audio_input"
+                )
+
                 clear_session_btn = gr.Button(
                     "Reset Session",
                     variant="secondary",
                     size="lg"
                 )
 
-        def stream_audio_chunk(audio_chunk, conversation_id, realtime_agent):
-                """Stream audio chunks in real-time to Realtime API"""
-                agent_names = list(config.AGENT_PERSONAS.keys())
-                n_avatars = len(agent_names)
-                def avatar_updates():
-                    return [gr.update() for _ in range(n_avatars)]
+        def stream_audio_webrtc(audio_frame, conversation_id, realtime_agent, audio_handler):
+            """Handle WebRTC audio streaming with FastRTC"""
+            agent_names = list(config.AGENT_PERSONAS.keys())
 
-                if audio_chunk is None:
-                    return (
-                        gr.update(),
-                        gr.update(),
-                        *avatar_updates()
-                    )
+            if audio_frame is None:
+                return None
 
-                try:
-                    # Stream chunk to Realtime API (non-blocking)
-                    # Returns cached response if available, otherwise None
-                    output_audio, active_agent = stream_audio_chunk_realtime(
-                        audio_chunk,
-                        conversation_id,
-                        realtime_agent=realtime_agent
-                    )
+            try:
+                # Process audio through the handler
+                output_audio = audio_handler.receive(audio_frame)
 
-                    # If we got a response, show "Speaking..." indicator
-                    if output_audio is not None and active_agent is not None:
-                        avatar_htmls = [create_agent_avatar(agent_name, active_agent == agent_name) for agent_name in agent_names]
+                # Get the active agent
+                active_agent = audio_handler.get_active_agent()
 
-                        return (
-                            gr.update(label=f"🔊 {active_agent} is speaking..."),
-                            output_audio,
-                            *avatar_htmls
-                        )
-                    else:
-                        # No response yet, continue streaming
-                        return (
-                            gr.update(),
-                            gr.update(),
-                            *avatar_updates()
-                        )
-                except Exception as e:
-                    print(f"Error streaming audio: {e}")
-                    return (
-                        gr.update(),
-                        gr.update(),
-                        *avatar_updates()
-                    )
+                # Update avatars based on active agent
+                if active_agent:
+                    avatar_htmls = [
+                        create_agent_avatar(agent_name, active_agent == agent_name)
+                        for agent_name in agent_names
+                    ]
+
+                    # If we got a response, update all UI elements
+                    if output_audio is not None:
+                        return output_audio, *avatar_htmls
+
+                return None
+
+            except Exception as e:
+                print(f"Error in WebRTC streaming: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
 
         # Dynamically set outputs for avatars
         avatar_output_components = [avatar_components[name] for name in agent_names]
+
+        # Connect WebRTC stream event to handler
         audio_input.stream(
-            fn=stream_audio_chunk,
-            inputs=[audio_input, conversation_state, realtime_agent_state],
-            outputs=[
-                audio_input,
-                audio_output,
-                *avatar_output_components
-            ]
+            fn=stream_audio_webrtc,
+            inputs=[audio_input, conversation_state, realtime_agent_state, gr.State(audio_handler)],
+            outputs=[audio_output, *avatar_output_components]
         )
 
         def clear_onboarding_session(conversation_id):
