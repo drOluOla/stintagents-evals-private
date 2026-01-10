@@ -1,117 +1,67 @@
 """
-FastRTC StreamHandler for StintAgents Realtime API Integration
+FastRTC Handler for StintAgents Realtime API Integration
+Uses ReplyOnPause for automatic voice activity detection and turn-taking
 """
 import numpy as np
-from queue import Queue, Empty
-from fastrtc import StreamHandler, AdditionalOutputs
+from fastrtc import AdditionalOutputs
 import stintagents.config as config
-from typing import Optional
+from typing import Tuple, Optional
 
 
-class RealtimeAudioHandler(StreamHandler):
+def create_realtime_handler(conversation_id: str, realtime_agent, CONVERSATION_SESSIONS):
     """
-    FastRTC StreamHandler that processes audio through OpenAI Realtime API.
-    Handles audio streaming, agent responses, and multi-agent handoffs.
-    """
+    Create a handler function for FastRTC ReplyOnPause.
 
-    def __init__(self, conversation_id: str, realtime_agent, CONVERSATION_SESSIONS):
+    This generator function processes audio through OpenAI Realtime API
+    and yields responses with avatar updates.
+
+    Args:
+        conversation_id: Unique identifier for this conversation
+        realtime_agent: RealtimeAgent instance from agents.realtime
+        CONVERSATION_SESSIONS: Global session storage dictionary
+
+    Returns:
+        Generator function that processes audio and yields responses
+    """
+    # Import the streaming utility
+    from .utils import process_voice_input_realtime
+    from .ui import create_agent_avatar
+
+    def handler(audio_data: Tuple[int, np.ndarray]) -> Tuple[int, np.ndarray]:
         """
-        Initialize the handler with conversation context.
+        Process audio input and return AI response.
+
+        This function is called by ReplyOnPause after detecting user finished speaking.
 
         Args:
-            conversation_id: Unique identifier for this conversation
-            realtime_agent: RealtimeAgent instance from agents.realtime
-            CONVERSATION_SESSIONS: Global session storage dictionary
+            audio_data: Tuple of (sample_rate, audio_array) from user's microphone
+
+        Yields:
+            Tuple of (sample_rate, response_audio) with AdditionalOutputs for avatars
         """
-        super().__init__()
-        self.conversation_id = conversation_id
-        self.realtime_agent = realtime_agent
-        self.CONVERSATION_SESSIONS = CONVERSATION_SESSIONS
-        self.active_agent_name = realtime_agent.name if realtime_agent else None
-
-        # Queue to store responses for emission
-        self.response_queue = Queue()
-
-        # Import the streaming utility
-        from .utils import stream_audio_chunk_realtime
-        self.stream_audio_chunk = stream_audio_chunk_realtime
-
-    def copy(self) -> "RealtimeAudioHandler":
-        """Create a copy of this handler for a new connection."""
-        return RealtimeAudioHandler(
-            self.conversation_id,
-            self.realtime_agent,
-            self.CONVERSATION_SESSIONS
-        )
-
-    def receive(self, frame: tuple[int, np.ndarray]) -> None:
-        """
-        Process incoming audio frame from the client.
-
-        This method receives audio from the user's microphone, processes it through
-        the Realtime API, and queues any responses for emission.
-
-        Args:
-            frame: Tuple of (sample_rate, audio_data)
-        """
-        if frame is None:
+        if audio_data is None:
             return
 
-        # Stream the audio chunk to Realtime API
-        output_audio, active_agent = self.stream_audio_chunk(
-            frame,
-            self.conversation_id,
-            realtime_agent=self.realtime_agent
+        # Process through Realtime API (waits for complete response)
+        output_audio, active_agent = process_voice_input_realtime(
+            audio_data,
+            conversation_id=conversation_id,
+            realtime_agent=realtime_agent
         )
 
-        # Update active agent if changed
-        if active_agent:
-            self.active_agent_name = active_agent
+        # If we got a response, yield it with avatar updates
+        if output_audio is not None and active_agent is not None:
+            # Create avatar updates showing which agent is speaking
+            agent_names = list(config.AGENT_PERSONAS.keys())
+            avatar_htmls = [
+                create_agent_avatar(agent_name, active_agent == agent_name)
+                for agent_name in agent_names
+            ]
 
-        # Queue response with agent information if available
-        if output_audio is not None:
-            self.response_queue.put((output_audio, active_agent))
+            # Yield additional outputs for avatar highlighting
+            yield AdditionalOutputs(*avatar_htmls)
 
-    def emit(self) -> Optional[tuple[int, np.ndarray]]:
-        """
-        Emit audio responses back to the client.
+            # Return the audio response
+            yield output_audio
 
-        Also yields AdditionalOutputs with active agent information for UI updates.
-
-        Returns:
-            Tuple of (sample_rate, audio_response) if available, else None
-        """
-        try:
-            # Non-blocking get - return immediately if no response available
-            output_audio, active_agent = self.response_queue.get_nowait()
-
-            # Yield additional outputs for avatar updates
-            if active_agent:
-                # Import here to avoid circular dependency
-                from .ui import create_agent_avatar
-
-                agent_names = list(config.AGENT_PERSONAS.keys())
-                avatar_htmls = [
-                    create_agent_avatar(agent_name, active_agent == agent_name)
-                    for agent_name in agent_names
-                ]
-
-                # Return audio and yield additional outputs for avatars
-                yield AdditionalOutputs(*avatar_htmls)
-
-            return output_audio
-
-        except Empty:
-            return None
-
-    def start_up(self) -> None:
-        """Called when the stream starts."""
-        pass
-
-    def shutdown(self) -> None:
-        """Called when the stream ends."""
-        pass
-
-    def get_active_agent(self) -> Optional[str]:
-        """Get the name of the currently active agent."""
-        return self.active_agent_name
+    return handler

@@ -2,8 +2,8 @@
 Gradio UI components for StintAgents Voice AI - Realtime API with FastRTC
 """
 import gradio as gr
-from fastrtc import WebRTC
-from .fastrtc_handler import RealtimeAudioHandler
+from fastrtc import WebRTC, ReplyOnPause
+from .fastrtc_handler import create_realtime_handler
 
 import stintagents.config as config
 
@@ -162,13 +162,6 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
 
             # Real-time audio streaming with FastRTC WebRTC
             with gr.Column(elem_classes="audio-recorder-container"):
-                # Create FastRTC handler
-                audio_handler = RealtimeAudioHandler(
-                    conversation_id=conversation_id,
-                    realtime_agent=realtime_agent,
-                    CONVERSATION_SESSIONS=CONVERSATION_SESSIONS
-                )
-
                 # WebRTC component for low-latency audio streaming
                 audio_input = WebRTC(
                     label=" ",  # Blank label to match original design
@@ -187,9 +180,16 @@ def create_gradio_interface(CONVERSATION_SESSIONS, conversation_id, realtime_age
         # Dynamically set outputs for avatars
         avatar_output_components = [avatar_components[name] for name in agent_names]
 
-        # Connect FastRTC handler to WebRTC component
+        # Create handler function with conversation context
+        handler_fn = create_realtime_handler(
+            conversation_id=conversation_id,
+            realtime_agent=realtime_agent,
+            CONVERSATION_SESSIONS=CONVERSATION_SESSIONS
+        )
+
+        # Connect FastRTC with ReplyOnPause for automatic voice detection
         audio_input.stream(
-            fn=audio_handler,
+            fn=ReplyOnPause(handler_fn),
             inputs=[audio_input],
             outputs=[audio_input],
             time_limit=90
